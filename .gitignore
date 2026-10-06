@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# Environment files hold secrets — never committed. The .env.example files are.
+.env
+.env.*.local
+
+# OS
+.DS_Store
+*.log
