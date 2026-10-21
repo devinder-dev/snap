@@ -5,8 +5,8 @@ Fastify on Bun, Postgres, S3 for photos, socket.io for realtime pushes.
 ## Run it
 
 ```bash
-docker compose up -d        # from the repo root: Postgres on :5432
-cp .env.example .env        # fill in DATABASE_URL, JWT_SECRET_KEY, S3_*
+docker compose up -d        # from the repo root: Postgres :5432, RabbitMQ :5672
+cp .env.example .env        # fill in DATABASE_URL, RABBITMQ_URL, JWT_SECRET_KEY, S3_*
 bun install
 bun run migrate             # applies db/migrations (dbmate)
 bun run dev                 # http://localhost:3000

@@ -1,7 +1,8 @@
 # Snap — scaling plan: several servers, RabbitMQ and Kubernetes
 
-Status: **Step 0 done** (2026-10-17). The app is finished and runs on one server, on its own
-S3 bucket, with a committed end-to-end test; Steps 1–12 are not started. On 2026-10-07 the plan
+Status: **Step 1 done** (2026-10-21). The app is finished and runs on one server, on its own
+S3 bucket, with a committed end-to-end test; RabbitMQ runs next to Postgres but the app doesn't
+use it yet. Steps 2–12 are not started. On 2026-10-07 the plan
 changed to run on **Kubernetes** — section 0 says what was planned before, what changes, and why.
 Verified beforehand: `amqplib` 2.2 works under Bun 1.3.14, and every RabbitMQ feature used
 below (topic routing, alternate exchange, TTL → dead-letter timer, nack → dead-letter queue)
@@ -17,6 +18,16 @@ was tested against RabbitMQ 4.
 | 2 | 2026-10-06 | + the portfolio goal: own S3 account, e2e test, CI, hardening, deploy, load test, docs |
 | 3 | 2026-10-07 | + **Kubernetes**: the copies run in a Kubernetes cluster instead of docker compose + nginx |
 | 3.1 | 2026-10-17 | Security scans: GitHub's CodeQL + Dependabot in CI instead of Snyk |
+| 3.2 | 2026-10-21 | Local Docker setup: Snap's own Postgres, ports for this laptop only |
+
+### Version 3.2 — local Docker setup (2026-10-21)
+
+| Topic | Before | After | Why |
+|---|---|---|---|
+| Postgres on the laptop | Borrowed from an older copy of the project (Snap-v0): same `container_name: snap-postgres`, same port | Its own container and volume; compose project `name: snap`, no `container_name` | Two projects can't share a fixed container name, and Snap-v2 never had a database of its own. The old one held 0 users, so nothing was lost |
+| Container names | Fixed with `container_name` | Compose's own: `snap-postgres-1`, `snap-rabbitmq-1` | Unique per project, and `docker compose up --scale` works |
+| Project folder in Postgres | Mounted at `/volume` | Not mounted | Postgres could read `backend/.env`; it only needs its data volume |
+| Published ports | `0.0.0.0` — reachable from the whole Wi-Fi | `127.0.0.1` — this laptop only | `postgres`/`postgres` and `snap`/`snap` are fine passwords on a laptop, not on a café network. The phone only talks to the API (:3000), so it's unaffected |
 
 ### Version 3.1 — security scans (2026-10-17)
 
@@ -113,7 +124,7 @@ and documented well enough that someone who has never seen it understands it in 
 |---|---|---|
 | – | App on one server: auth, friends, snaps, chat, live pushes | ✅ 2026-09-30 |
 | 0 | Public repo, own S3 account, end-to-end test back | ✅ 2026-10-17 |
-| 1 | RabbitMQ running | ⬜ |
+| 1 | RabbitMQ running | ✅ 2026-10-21 |
 | 2 | Queue module | ⬜ |
 | 3 | Live pushes across servers | ⬜ |
 | 4 | Worker + snap timer | ⬜ |
@@ -676,14 +687,21 @@ buckets, reading the bucket's settings and reading IAM all get *AccessDenied*.
 
 ### Step 1 — RabbitMQ running
 
-- [ ] Add `rabbitmq:4-management` to `docker-compose.yml`: ports 5672 + 15672, volume,
+- [x] Add `rabbitmq:4-management` to `docker-compose.yml`: ports 5672 + 15672, volume,
       healthcheck `rabbitmq-diagnostics -q ping`, user `snap`/`snap` via
-      `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS`.
-- [ ] Mount `infra/rabbitmq/enabled_plugins`:
+      `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS`, fixed `hostname: rabbitmq`.
+- [x] Mount `infra/rabbitmq/enabled_plugins`:
       `[rabbitmq_management,rabbitmq_shovel,rabbitmq_shovel_management].`
-- [ ] `bun add amqplib`; add `RABBITMQ_URL` to `.env` and `.env.example`.
+- [x] `bun add amqplib`; add `RABBITMQ_URL` to `.env` and `.env.example`.
+- [x] Snap's own Postgres (version 3.2 in section 0): no `container_name`, no `.:/volume`,
+      ports on `127.0.0.1`; `bun run migrate` on the fresh database.
 
 ✅ **Done when:** `docker compose up -d rabbitmq` → http://localhost:15672 opens, login `snap`/`snap`.
+
+**Result (2026-10-21):** RabbitMQ 4.4.0, node `rabbit@rabbitmq`, all three plugins on; `snap`/`snap`
+logs in, `guest` doesn't exist. A throwaway `amqplib` script under Bun connected, published on a
+confirm channel, got the confirm, read the message back and closed cleanly. `bun run e2e`:
+67 of 67 against the new Postgres.
 
 ### Step 2 — Queue module
 
@@ -691,6 +709,9 @@ buckets, reading the bucket's settings and reading IAM all get *AccessDenied*.
       `services.ts` uses `SNAP_TTL_MS` from here instead of its own constant.
 - [ ] `src/queue/connection.ts`: connect with backoff (1 s → 30 s), confirm channel, emit
       `ready` on (re)connect — only after the topology is declared — close cleanly on shutdown.
+      Decide first: `amqplib` has had built-in reconnects since v1.1
+      (`connect(url, { recovery })`: backoff, jitter, max delay, a `setup` hook per connection) —
+      use those, or write our own?
 - [ ] `src/queue/topology.ts`: all names as constants; `declareTopology(channel)` asserts every
       exchange, queue and binding from section 5.
 - [ ] `src/queue/events.ts` + `publish.ts`: routing keys, payload types, `publishEvent`.
@@ -969,6 +990,9 @@ afterwards.
   them look like typos. Bind first, then publish.
 - **RabbitMQ needs a StatefulSet, not a Deployment.** It stores its data under its own hostname;
   a Deployment gives the pod a new name on every restart, and RabbitMQ wouldn't find its data.
+  The same in docker compose: without `hostname:`, every recreated container gets a random one.
+- **`guest` only logs in from inside the container**, and doesn't exist at all once
+  `RABBITMQ_DEFAULT_USER` is set — hence our own `snap` user.
 
 **Kubernetes**
 - **ingress-nginx is retired** (March 2026) — no more security fixes. Use Gateway API.

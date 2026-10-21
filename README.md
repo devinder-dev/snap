@@ -124,9 +124,9 @@ You need Bun, Docker, and an S3 bucket with an IAM user that can put, get and de
 in it (policy in [`backend/infra/s3-policy.json`](backend/infra/s3-policy.json)).
 
 ```bash
-docker compose up -d                  # PostgreSQL on :5432
+docker compose up -d                  # PostgreSQL :5432, RabbitMQ :5672 (web UI :15672)
 cd backend
-cp .env.example .env                  # DATABASE_URL, JWT_SECRET_KEY, S3_*
+cp .env.example .env                  # DATABASE_URL, RABBITMQ_URL, JWT_SECRET_KEY, S3_*
 bun install && bun run migrate
 bun run dev                           # http://localhost:3000
 bun run e2e                           # in a second terminal: 67 end-to-end checks

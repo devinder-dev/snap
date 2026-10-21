@@ -1,16 +1,22 @@
+# Everyday development: Postgres + RabbitMQ on the laptop.
+# The API runs outside Docker with `bun run dev` (see backend/README.md).
+
+# A fixed project name, so containers and volumes are called snap-… whatever
+# the folder is named. No container_name: compose's own names can't collide
+# with other projects.
+name: snap
+
 services:
   postgres:
     image: postgres:17
-    container_name: snap-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: snap
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432" # this laptop only, not the whole Wi-Fi
     volumes:
-      - .:/volume
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d snap"]
@@ -18,5 +24,30 @@ services:
       timeout: 5s
       retries: 5
 
+  rabbitmq:
+    image: rabbitmq:4-management
+    # RabbitMQ keeps its data under rabbit@<hostname>. Docker gives every new
+    # container a random hostname, so without this a recreated container
+    # would start empty even though the volume still holds the old data.
+    hostname: rabbitmq
+    restart: unless-stopped
+    environment:
+      # The built-in "guest" user may only log in from inside the container.
+      RABBITMQ_DEFAULT_USER: snap
+      RABBITMQ_DEFAULT_PASS: snap
+    ports:
+      - "127.0.0.1:5672:5672" # AMQP: the backend
+      - "127.0.0.1:15672:15672" # web UI: http://localhost:15672
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./infra/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # RabbitMQ takes a while to boot
+
 volumes:
   postgres-data:
+  rabbitmq-data:
