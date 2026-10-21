@@ -55,6 +55,14 @@ function parseCredentials(body: Partial<AuthRequest> | undefined): AuthRequest {
     return { username, password }
 }
 
+// Answers as long as the process can serve a request, and checks nothing else.
+// A probe that queried the database every few seconds would keep a hosted
+// database awake around the clock — and a database outage isn't something a
+// restart of this process could fix anyway.
+export async function health(_req: FastifyRequest, res: FastifyReply) {
+    res.status(200).send({ status: 'ok' })
+}
+
 export async function register(req: FastifyRequest<{ Body: AuthRequest }>, res: FastifyReply) {
     const createdUser = await services.register(parseCredentials(req.body))
 

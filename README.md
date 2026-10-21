@@ -4,19 +4,19 @@ A Snapchat-style app: send photo and text snaps that can be viewed once and disa
 24 hours, chat with friends, and get every update live.
 
 **Expo (React Native) · Bun · Fastify · PostgreSQL · AWS S3 · socket.io** — and, in progress,
-**RabbitMQ · nginx · Docker** to run the backend as several servers at once.
+**RabbitMQ · Docker · Kubernetes** to run the backend as several copies at once.
 
 > **Status:** the app works end to end on one server. Now it's being scaled out to several
-> servers behind a load balancer, with RabbitMQ carrying live events and background jobs between
-> them — step by step, each step tested before the next. The full plan and progress are in
+> copies on Kubernetes, with RabbitMQ carrying live events and background jobs between them —
+> step by step, each step tested before the next. The full plan and progress are in
 > **[SCALING-PLAN.md](SCALING-PLAN.md)**.
 
 ## What it does
 
 - **Accounts** — register, log in; short-lived JWT access tokens refreshed automatically.
 - **Friends** — add someone, they add you back, you're friends. Snaps only go to friends.
-- **Snaps** — photo or text to one or many friends. A photo is opened through a 5-minute
-  presigned S3 link, and **only once**: the read that authorizes it also marks it viewed.
+- **Snaps** — a photo, with an optional caption, to one or many friends. It is opened through
+  a 5-minute presigned S3 link, and **only once**: the read that authorizes it also marks it viewed.
   The sender is told if you screenshot it. After 24 hours the photo and the row are deleted.
 - **Chat** — one-to-one messages with paged history and a conversation list.
 - **Live pushes** — new snaps, messages, friend requests and screenshots arrive over a
@@ -37,14 +37,14 @@ flowchart LR
 This can't simply be copied onto more servers: each user's socket lives in **one** server's
 memory, so a message saved by server 1 can't be pushed to someone connected to server 2.
 
-## Where it's going — several servers
+## Where it's going — several copies on Kubernetes
 
 ```mermaid
 flowchart TB
-    app["Expo app"] -->|"HTTPS + WebSocket"| lb["nginx load balancer"]
-    lb --> api1["API 1"]
-    lb --> api2["API 2"]
-    lb --> api3["API 3"]
+    app["Expo app"] -->|"HTTPS + WebSocket"| lb["Kubernetes Gateway + Service"]
+    lb --> api1["api pod 1"]
+    lb --> api2["api pod 2"]
+    lb --> api3["api pod 3"]
     api1 <--> mq["RabbitMQ"]
     api2 <--> mq
     api3 <--> mq
@@ -55,9 +55,13 @@ flowchart TB
     api3 --> data
 ```
 
-Every API copy is identical and keeps no state of its own. After each write it publishes an
-event; RabbitMQ hands a copy to every server, and whichever one holds the recipient's socket
+Every api pod is identical and keeps no state of its own. After each write it publishes an
+event; RabbitMQ hands a copy to every pod, and whichever one holds the recipient's socket
 pushes it. No sticky sessions needed — the app connects over WebSocket only.
+
+Kubernetes runs the pods: it restarts any that die, replaces them one by one on a new version,
+and adds pods under load (2–6). It doesn't know which pod holds whose socket — that's
+RabbitMQ's job.
 
 ### Following one message across servers
 
@@ -111,7 +115,7 @@ job never leaves a photo behind.
 backend/          Fastify API on Bun — routes, services, Postgres repository, S3, socket.io
   db/migrations/  SQL migrations (dbmate)
 snap/             Expo app (SDK 54, expo-router) — runs in Expo Go
-SCALING-PLAN.md   The scaling plan: design, RabbitMQ topology, steps and progress
+SCALING-PLAN.md   The scaling plan: design, RabbitMQ topology, Kubernetes, steps and progress
 ```
 
 ## Run it locally
@@ -125,6 +129,7 @@ cd backend
 cp .env.example .env                  # DATABASE_URL, JWT_SECRET_KEY, S3_*
 bun install && bun run migrate
 bun run dev                           # http://localhost:3000
+bun run e2e                           # in a second terminal: 67 end-to-end checks
 
 cd ../snap
 cp .env.example .env                  # EXPO_PUBLIC_API_URL = your computer's LAN address

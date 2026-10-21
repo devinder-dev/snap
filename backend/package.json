@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "dev": "bun run --sql-preconnect src/index.ts",
-    "migrate": "bun scripts/migrate.ts"
+    "migrate": "bun scripts/migrate.ts",
+    "e2e": "bun scripts/e2e.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

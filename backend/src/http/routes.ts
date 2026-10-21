@@ -3,6 +3,14 @@ import * as controllers from './controllers'
 
 async function routes(httpServer: FastifyInstance) {
 
+    // Liveness: "is this process up". Docker and the host call it every few
+    // seconds, so it must never touch Postgres — see controllers.health.
+    httpServer.route({
+        method: 'GET',
+        url: '/health',
+        handler: controllers.health
+    })
+
     httpServer.route({
         method: 'POST',
         url: '/register',

@@ -9,7 +9,7 @@
         "s3:GetObject",
         "s3:DeleteObject"
       ],
-      "Resource": "arn:aws:s3:::fos25-snap/*"
+      "Resource": "arn:aws:s3:::snapchatv2/*"
     }
   ]
 }

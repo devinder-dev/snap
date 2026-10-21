@@ -10,7 +10,12 @@ cp .env.example .env        # fill in DATABASE_URL, JWT_SECRET_KEY, S3_*
 bun install
 bun run migrate             # applies db/migrations (dbmate)
 bun run dev                 # http://localhost:3000
+bun run e2e                 # in a second terminal: the whole API end to end
 ```
+
+`bun run e2e` drives the running server the way the app does — HTTP for writes,
+socket.io for pushes — with four throwaway `zzt_…` users and a real S3 upload,
+then deletes all of it. Point it elsewhere with `E2E_BASE_URL`.
 
 `bun run migrate status` / `bun run migrate rollback` pass straight through to dbmate.
 The script adds `sslmode=disable` for dbmate only; the app's `DATABASE_URL` stays as is.

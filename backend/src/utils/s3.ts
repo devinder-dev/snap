@@ -13,11 +13,20 @@ function required(name: string): string {
     return value
 }
 
+// Bun reads credentials from env vars only — no IAM roles, ~/.aws profiles or
+// SSO like the AWS SDK — so on every machine the keys arrive this way.
+//
+// The last two are optional. S3_ENDPOINT points at an S3-compatible server
+// instead of AWS (the stand-in CI uses, so CI never holds real keys), and
+// S3_SESSION_TOKEN comes with temporary credentials. `|| undefined` so an empty
+// line in .env counts as unset rather than as an empty endpoint.
 const client = new S3Client({
     accessKeyId: required('S3_ACCESS_KEY_ID'),
     secretAccessKey: required('S3_SECRET_ACCESS_KEY'),
     region: required('S3_REGION'),
     bucket: required('S3_BUCKET'),
+    endpoint: process.env.S3_ENDPOINT || undefined,
+    sessionToken: process.env.S3_SESSION_TOKEN || undefined,
 })
 
 // Uint8Array covers Buffer too, which is what a multipart form part gives you.
