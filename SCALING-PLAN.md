@@ -1,12 +1,14 @@
 # Snap — scaling plan: several servers and RabbitMQ
 
-Status: **Step 5 done** (2026-11-17), **plan version 4** (2026-11-17). The app runs on its own
+Status: **Step 6 done** (2026-11-17), **plan version 4** (2026-11-17). The app runs on its own
 S3 bucket, with a committed end-to-end test, and several copies of the backend can now run side
 by side: every live push goes through RabbitMQ, and each copy's relay delivers it to the phones
 connected there. A worker deletes each snap when its 24-hour timer runs out, tries a failed
 delete 3 times 30 s apart, then parks it in `snap.dead.queue` and warns; `bun run dead-letters`
-replays or purges, and `bun run sweep` is the safety net. All the RabbitMQ code is done; Steps
-6–12 (containers, CI, deploy, proof) are not started (Step 8 was dropped). Version 4 runs the
+replays or purges, and `bun run sweep` is the safety net. The backend now builds as a Docker
+image (`app` for the api, worker and sweep; `tools` for migrations and the e2e), and both the
+api and the worker shut down cleanly on `docker stop`. Steps 7–12 (three copies behind Traefik,
+CI, deploy, proof) are not started (Step 8 was dropped). Version 4 runs the
 copies with **docker compose behind Traefik** instead of Kubernetes — section 0 says what
 changed and why.
 Verified beforehand: `amqplib` 2.2 works under Bun 1.3.14, and every RabbitMQ feature used
@@ -186,7 +188,7 @@ Kubernetes is shown in another project (Relay). Here the point is the realtime s
 | 3 | Live pushes across servers | ✅ 2026-11-17 |
 | 4 | Worker + snap timer | ✅ 2026-11-17 |
 | 5 | Retries, dead letters, alternate exchange | ✅ 2026-11-17 |
-| 6 | Docker image | ⬜ |
+| 6 | Docker image | ✅ 2026-11-17 |
 | 7 | Several copies on the laptop: docker compose + Traefik | ⬜ |
 | 8 | ~~Kubernetes like production~~ | Dropped in version 4 |
 | 9 | CI/CD on every push | ⬜ |
@@ -597,6 +599,7 @@ New variables in `backend/.env` (and `.env.example`):
 | `SNAP_TTL_MS` | `86400000` (24 h) | api (`expires_at`) **and** topology (timer TTL) — one value, so they can't drift |
 | `SNAP_RETRY_DELAY_MS` | `30000` | worker, topology |
 | `SNAP_MAX_ATTEMPTS` | `3` | worker |
+| `HOST` | *(set to `0.0.0.0` by the Docker image; the laptop's default is `localhost`)* | api — which network interface it listens on |
 
 ⚠️ **Changing `SNAP_TTL_MS` or `SNAP_RETRY_DELAY_MS` after the queues exist:** RabbitMQ refuses to
 redeclare a queue with different arguments (`PRECONDITION_FAILED`). Stop the apps, delete
@@ -873,7 +876,7 @@ answer) fixed it; retested with 1 and with 3 parked jobs (section 14).
 *Version 3 dropped the compose replicas and nginx for Kubernetes; version 4 brings the
 replicas back in Step 7, with Traefik in front. The `migrate` target became `tools`.*
 
-- [ ] `backend/Dockerfile` (`oven/bun:1.3-slim`, runs as the unprivileged `bun` user). Two
+- [x] `backend/Dockerfile` (`oven/bun:1.3-slim`, runs as the unprivileged `bun` user). Two
       targets:
       - `app` — `bun install --frozen-lockfile --production`, `CMD bun run src/index.ts`. The
         worker and the sweep use the same image with a different command, so there is one image
@@ -882,16 +885,36 @@ replicas back in Step 7, with Traefik in front. The `migrate` target became `too
         e2e. Runs `bun run migrate` by default.
 
       Check that `bcrypt` (native module) installs on Linux.
-- [ ] `backend/.dockerignore`: `node_modules`, `.env`, `.env.*`. Without it the image would
+- [x] `backend/.dockerignore`: `node_modules`, `.env`, `.env.*`. Without it the image would
       contain your S3 and JWT secrets, and the Mac build of `bcrypt` would replace the Linux one.
-- [ ] Delete `backend/package-lock.json` — one lockfile, `bun.lock`.
-- [ ] API shuts down gracefully on `SIGTERM`: stop taking requests, close the sockets (the
+- [x] Delete `backend/package-lock.json` — one lockfile, `bun.lock`.
+- [x] API shuts down gracefully on `SIGTERM`: stop taking requests, close the sockets (the
       phones reconnect to another copy), stop the relay, close RabbitMQ. `docker stop` and every
       deploy send `SIGTERM` (section 9, rule 7).
+- [x] *Added when building:* the worker shuts down gracefully too (rule 7 already asked for it):
+      cancel the consumer, let running jobs finish and ack, close RabbitMQ and Postgres.
 
 ✅ **Done when:** the image builds; a container from it (pointed at the laptop's Postgres and
 RabbitMQ) passes the e2e; `docker stop` shows a clean shutdown in the log within a few seconds,
 not a kill after the timeout.
+
+**Result (2026-11-17):** built as planned with three changes. The base is `oven/bun:1.4.4-slim`
+(the Bun the code is developed with; arm64 and amd64 both exist), and `CMD` is the exec form
+`["bun", "--sql-preconnect", "src/index.ts"]`, so Bun is the first process and gets the
+signal. `.dockerignore` is an **allowlist** (`*`, then `package.json`, `bun.lock`,
+`tsconfig.json`, `src`, `scripts`, `db`): nothing new reaches the image unless added on purpose.
+The image sets `HOST=0.0.0.0` (Fastify's default `localhost` is unreachable from outside a
+container; the laptop keeps `localhost`). Sizes: `app` 366 MB, `tools` 420 MB. Tested on the
+`snap_default` network: the `app` image runs as `bun` (uid 1000), holds no `.env` or local
+files and no dev packages, and `bcrypt` works on Linux; an api container passed **e2e 67 of 67**
+from the laptop and again from a `tools` container inside the network; `docker stop` on the api
+took 0.2 s, exit 0; on the worker 0.1 s, exit 0; `tools` ran the migrations ("Applied: 4,
+Pending: 0"); Ctrl-C on the laptop exits cleanly for both. **Bug found and fixed:** the
+existing `preClose` hook used `disconnectSockets(true)`, which tells each phone "you are
+disconnected" (`io server disconnect`) — and socket.io-client never reconnects after that by
+itself, so after every stop or deploy phones would have had no live pushes until reopened. Now
+it calls `engine.close()`: the phone sees `transport close`, and in the test it reconnected on
+its own to a new api container 2.5 s later (section 14).
 
 ### Step 7 — Several copies on the laptop: docker compose + Traefik
 
@@ -1144,6 +1167,14 @@ afterwards.
   (Step 3). To reset a copy's realtime queue, force-close its connection instead.
 - **A deleted S3 object answers 403, not 404**, because the IAM user has no `s3:ListBucket`
   (Step 4). Tests check "not 200".
+- **Bun as a container's first process ignores SIGTERM** unless the code listens for it, so
+  `docker stop` waits 10 s and kills. Both the api and the worker handle SIGTERM and SIGINT, and
+  the image's `CMD` is the exec form so the signal reaches Bun, not a shell (Step 6).
+- **Fastify listens on `localhost` by default**, which inside a container is the container
+  itself. The image sets `HOST=0.0.0.0` (Step 6).
+- **Don't end a socket.io session from the server on shutdown.** `disconnectSockets()` gives
+  the phone `io server disconnect`, and socket.io-client then never reconnects by itself.
+  Closing the connections (`engine.close()`) gives `transport close`, and it does (Step 6).
 
 ---
 

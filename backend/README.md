@@ -100,6 +100,27 @@ bun run dead-letters replay # once the cause is fixed: back to the worker, attem
 bun run dead-letters purge  # delete them for good
 ```
 
+## Docker
+
+One `Dockerfile`, two targets. `app` runs the api by default, and the worker and the
+sweep with a different command; `tools` adds the dev packages and runs the migrations
+(and the e2e). Only what `.dockerignore` lets in reaches the image — never `.env`.
+
+```bash
+docker build --target app   -t snap-app   .
+docker build --target tools -t snap-tools .
+
+# On the compose network, where the database and RabbitMQ are called postgres
+# and rabbitmq (DATABASE_URL and RABBITMQ_URL must use those names):
+docker run --rm --network snap_default --env-file .env -p 127.0.0.1:3001:3000 snap-app
+docker run --rm --network snap_default --env-file .env snap-app bun --sql-preconnect src/worker.ts
+docker run --rm --network snap_default --env-file .env snap-tools          # migrations
+```
+
+`docker stop` sends SIGTERM, and both shut down cleanly in well under a second: the
+api closes its sockets (phones reconnect to another copy), finishes open requests and
+closes RabbitMQ; the worker stops taking jobs and finishes the running ones.
+
 ## Layout
 
 ```
@@ -112,6 +133,7 @@ src/services.ts       business rules
 src/repository/       SQL (Bun.sql) and row types
 src/queue/            RabbitMQ: connection, topology, events, publish
 src/websocket/        socket.io server, handshake auth, publish + emit, relay
-scripts/              migrate, e2e, sweep
+scripts/              migrate, e2e, sweep, dead-letters
 db/migrations/        dbmate migrations
+Dockerfile            the image: `app` and `tools` targets
 ```

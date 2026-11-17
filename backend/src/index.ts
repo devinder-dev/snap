@@ -1,3 +1,4 @@
+import { sql } from "bun";
 import fastify from "fastify";
 import auth from "./auth";
 import routes from "./http/routes";
@@ -39,6 +40,39 @@ httpServer.addHook('onClose', closeQueue)
 
 const port = Number(process.env.PORT ?? 3000);
 
-await httpServer.listen({ port });
+// localhost on the laptop, as before. The Docker image sets HOST=0.0.0.0: in a
+// container "localhost" is the container itself, so nothing outside it —
+// Docker's port mapping, Traefik — could reach the API.
+const host = process.env.HOST ?? "localhost";
 
-console.log(`Listening on http://localhost:${port}`);
+await httpServer.listen({ port, host });
+
+console.log(`Listening on http://${host}:${port}`);
+
+// Graceful shutdown (SCALING-PLAN.md section 9, rule 7). `docker stop` and every
+// deploy send SIGTERM, then kill the process 10 s later; Ctrl-C sends SIGINT.
+// Bun ignores SIGTERM unless something listens for it, so without this every
+// stop would end in that kill.
+//
+// close() stops taking new connections, runs preClose (disconnects the sockets,
+// so the phones reconnect to another copy), waits for open requests to finish,
+// then runs onClose (closes RabbitMQ, and this copy's realtime queue with it).
+const SHUTDOWN_LIMIT_MS = 8_000;
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.once(signal, async () => {
+        console.log(`🛑 ${signal}: shutting down`);
+
+        // Something hanging must not turn this into Docker's kill at 10 s.
+        setTimeout(() => {
+            console.error("❌ Shutdown took too long, exiting anyway");
+            process.exit(1);
+        }, SHUTDOWN_LIMIT_MS).unref();
+
+        await httpServer.close();
+        await sql.close();
+
+        console.log("✅ Shut down cleanly");
+        process.exit(0);
+    });
+}

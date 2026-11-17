@@ -1,7 +1,8 @@
+import { sql } from 'bun'
 import type { Channel, ChannelModel, ConfirmChannel, ConsumeMessage } from 'amqplib'
 import { config } from './config'
 import { jobProperties, readAttempt } from './queue/attempts'
-import { connectQueue, watchChannel } from './queue/connection'
+import { closeQueue, connectQueue, watchChannel } from './queue/connection'
 import type { EventPayload } from './queue/events'
 import { QUEUES } from './queue/topology'
 import * as services from './services'
@@ -34,6 +35,11 @@ const PARKED_CHECK_MS = 60_000
 // channel, replaced on every reconnect.
 let checkChannel: Channel | null = null
 
+// For the shutdown: the current consumer, so it can be cancelled, and every
+// job still running, so they can finish first.
+let consumer: { channel: Channel; tag: string } | null = null
+const running = new Set<Promise<void>>()
+
 // Runs on every (re)connect, from setup() in queue/connection.ts.
 async function startWorker(model: ChannelModel, publish: ConfirmChannel): Promise<void> {
     // Step 1: A channel of its own, with at most PREFETCH unacked jobs.
@@ -42,7 +48,7 @@ async function startWorker(model: ChannelModel, publish: ConfirmChannel): Promis
     await channel.prefetch(PREFETCH)
 
     // Step 2: Read the queue. Each job runs on its own; up to PREFETCH at once.
-    await channel.consume(QUEUES.expire, (msg) => {
+    const { consumerTag } = await channel.consume(QUEUES.expire, (msg) => {
         // null: RabbitMQ cancelled this consumer, e.g. snap.expire.queue was
         // deleted in the web UI. Close the connection, and recovery declares
         // the queue again and starts a new consumer.
@@ -52,8 +58,11 @@ async function startWorker(model: ChannelModel, publish: ConfirmChannel): Promis
             return
         }
 
-        void handle(channel, publish, msg)
+        const job = handle(channel, publish, msg)
+        running.add(job)
+        void job.finally(() => running.delete(job))
     })
+    consumer = { channel, tag: consumerTag }
 
     // Step 3: Count the parking lots now, and every PARKED_CHECK_MS from here.
     checkChannel = channel
@@ -186,6 +195,37 @@ function settle(answer: () => void): void {
         console.warn('⚠️ Worker: channel closed before the answer, the job will come again')
     }
 }
+
+// Graceful shutdown (section 9, rule 7): `docker stop` sends SIGTERM and kills
+// the process 10 s later; Ctrl-C sends SIGINT. A job cut off halfway isn't
+// lost — unacked, it comes back after a restart — but finishing it is cleaner.
+const SHUTDOWN_LIMIT_MS = 8_000
+
+async function shutdown(signal: string): Promise<void> {
+    console.log(`🛑 ${signal}: taking no new jobs, finishing ${running.size} in progress`)
+
+    // Something hanging must not turn this into Docker's kill at 10 s.
+    setTimeout(() => {
+        console.error('❌ Shutdown took too long, exiting anyway')
+        process.exit(1)
+    }, SHUTDOWN_LIMIT_MS).unref()
+
+    // Step 1: Stop taking jobs. Fails harmlessly if the channel is already gone.
+    await consumer?.channel.cancel(consumer.tag).catch(() => {})
+
+    // Step 2: Let the running jobs finish and ack.
+    await Promise.allSettled(running)
+
+    // Step 3: Close RabbitMQ, then the database pool.
+    await closeQueue()
+    await sql.close()
+
+    console.log('✅ Worker shut down cleanly')
+    process.exit(0)
+}
+
+process.once('SIGTERM', () => void shutdown('SIGTERM'))
+process.once('SIGINT', () => void shutdown('SIGINT'))
 
 // Like the API, this returns at once: amqplib connects in the background and
 // runs startWorker on every (re)connect.

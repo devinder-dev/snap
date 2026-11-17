@@ -66,9 +66,14 @@ async function websocket(httpServer: FastifyInstance) {
         });
     });
 
+    // On shutdown (`docker stop`, a deploy): close the sockets' connections,
+    // not the sessions. disconnectSockets() would send each phone "you are
+    // disconnected" (reason "io server disconnect"), and socket.io-client never
+    // reconnects after that by itself. A closed connection looks like a dropped
+    // network instead ("transport close"), so the phone reconnects on its own —
+    // through the load balancer, to another copy.
     httpServer.addHook("preClose", (done) => {
-        // close all active connections on this server
-        websocketServer.local.disconnectSockets(true);
+        websocketServer.engine.close();
         done();
     });
 }

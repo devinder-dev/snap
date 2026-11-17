@@ -1,0 +1,17 @@
+# An allowlist: nothing is sent to the image build unless it's let in below.
+#
+# So secrets (.env), node_modules built for the Mac (the wrong bcrypt for
+# Linux) and any local or editor files stay out by default, and a new file
+# only reaches the image when someone adds it here on purpose.
+
+*
+
+!package.json
+!bun.lock
+!tsconfig.json
+!src
+!scripts
+!db
+
+# Finder litter inside the folders let in above.
+**/.DS_Store
