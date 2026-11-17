@@ -1,16 +1,15 @@
 # Snap — scaling plan: several servers and RabbitMQ
 
-Status: **Step 6 done** (2026-11-17), **plan version 4** (2026-11-17). The app runs on its own
-S3 bucket, with a committed end-to-end test, and several copies of the backend can now run side
-by side: every live push goes through RabbitMQ, and each copy's relay delivers it to the phones
-connected there. A worker deletes each snap when its 24-hour timer runs out, tries a failed
-delete 3 times 30 s apart, then parks it in `snap.dead.queue` and warns; `bun run dead-letters`
-replays or purges, and `bun run sweep` is the safety net. The backend now builds as a Docker
-image (`app` for the api, worker and sweep; `tools` for migrations and the e2e), and both the
-api and the worker shut down cleanly on `docker stop`. Steps 7–12 (three copies behind Traefik,
-CI, deploy, proof) are not started (Step 8 was dropped). Version 4 runs the
-copies with **docker compose behind Traefik** instead of Kubernetes — section 0 says what
-changed and why.
+Status: **Step 7 done** (2026-11-17), **plan version 4** (2026-11-17). The app runs on its own
+S3 bucket, with a committed end-to-end test. The whole backend now runs on the laptop as it
+will on the server: `docker compose` starts Traefik in front of three api copies, the worker,
+and the migrations before them. Every live push goes through RabbitMQ, so a message reaches
+the phone whichever copy holds its socket; a copy that dies drops out of Traefik, and its
+phones reconnect to another one by themselves. A worker deletes each snap when its 24-hour
+timer runs out, retries a failed delete, then parks it in `snap.dead.queue` and warns;
+`bun run sweep` is the safety net. Steps 9–12 (CI, public-internet hardening, deploy to one
+VPS, proof) are not started (Step 8 was dropped). Version 4 runs the copies with **docker
+compose behind Traefik** instead of Kubernetes — section 0 says what changed and why.
 Verified beforehand: `amqplib` 2.2 works under Bun 1.3.14, and every RabbitMQ feature used
 below (topic routing, alternate exchange, TTL → dead-letter timer, nack → dead-letter queue)
 was tested against RabbitMQ 4.
@@ -51,7 +50,7 @@ moving to Kubernetes later a move, not a rewrite (section 15).
 | Topic | Before (version 3) | After (version 4) | Why |
 |---|---|---|---|
 | Running 3 copies | Kubernetes Deployment, `replicas: 3` | docker compose, `deploy.replicas: 3` | Enough to prove pushes cross copies |
-| Load balancer | Service + Gateway API (Traefik) | A **Traefik** container with its Docker provider | Finds the copies through Docker as they start and stop (nginx resolves the names once, at startup); passes WebSockets as they are; gets Let's Encrypt certificates itself (Step 11); already known from Relay |
+| Load balancer | Service + Gateway API (Traefik) | A **Traefik** container with its Docker provider | Docker tells it at once when a copy starts, becomes healthy or stops, and it only routes to healthy copies (free nginx can re-resolve names since 1.27.3, but only notices a dead copy when a request fails; Caddy polls DNS and runs its own checks); passes WebSockets as they are; gets Let's Encrypt certificates itself (Step 11); already known from Relay. *Corrected 2026-11-17: this said nginx resolves names only at startup, which is out of date.* |
 | A copy hangs | Liveness probe restarts it | Compose `healthcheck` on `/health`; Traefik stops sending traffic to an unhealthy copy | Docker restarts a copy that crashes, not one that only hangs (section 14) |
 | How many copies | Autoscaler, 2–6 | Always 3 | Autoscaling is shown in Relay |
 | New version | Rolling update | Own deploy script in Step 11: start new copies, wait until healthy, stop the old ones | Compose has no rolling update; doing it by hand shows what one is |
@@ -189,7 +188,7 @@ Kubernetes is shown in another project (Relay). Here the point is the realtime s
 | 4 | Worker + snap timer | ✅ 2026-11-17 |
 | 5 | Retries, dead letters, alternate exchange | ✅ 2026-11-17 |
 | 6 | Docker image | ✅ 2026-11-17 |
-| 7 | Several copies on the laptop: docker compose + Traefik | ⬜ |
+| 7 | Several copies on the laptop: docker compose + Traefik | ✅ 2026-11-17 |
 | 8 | ~~Kubernetes like production~~ | Dropped in version 4 |
 | 9 | CI/CD on every push | ⬜ |
 | 10 | Ready for the public internet | ⬜ |
@@ -213,7 +212,7 @@ After every step: run its end-to-end test, review it together, then commit and p
 | S3 account | **Own AWS account**, IAM user with object-only access | The course bucket's key has to be replaced anyway (section 10) |
 | S3 in CI | **Local S3 stand-in** through `S3_ENDPOINT` | CI never holds real AWS keys |
 | Running the copies | **docker compose**: 3 api copies + 1 worker (section 0, version 4) | Enough to prove the scaling; Kubernetes is shown in Relay |
-| Load balancer | **Traefik** with its Docker provider | Picks up copies as they start and stop, passes WebSockets, gets certificates itself; no sticky sessions needed (section 2) |
+| Load balancer | **Traefik** with its Docker provider | Picks up copies as they start and stop and follows Docker's health status, passes WebSockets, gets certificates itself; no sticky sessions needed (section 2). Compared with Caddy and nginx on 2026-11-17 and kept: the deploy in Step 11 needs instant, health-aware discovery. Cost: Traefik reads the Docker socket |
 | Compose files | **One base file + an override file per place** (laptop stack, CI, server), merged with `-f` | Each place changes only what differs — the same idea as Kustomize overlays |
 | Postgres + RabbitMQ | **Containers with volumes**, as today | Whether production keeps Postgres on the VPS (with backups) or uses a managed database is decided at Step 11 |
 | Image registry | **GitHub Container Registry** (ghcr.io), tagged with the commit SHA | Free for public repos, next to the code; never `latest` |
@@ -920,7 +919,7 @@ its own to a new api container 2.5 s later (section 14).
 
 *New in version 4, in place of "Kubernetes on the laptop". Read section 4b first.*
 
-- [ ] `compose.stack.yml`, used together with `docker-compose.yml`
+- [x] `compose.stack.yml`, used together with `docker-compose.yml`
       (`export COMPOSE_FILE=docker-compose.yml:compose.stack.yml`, then plain `docker compose`):
   - `traefik`: Docker provider with `exposedByDefault=false` (only containers labelled
     `traefik.enable=true` get traffic), laptop port 8080 → the api copies. Check two settings:
@@ -936,8 +935,9 @@ its own to a new api container 2.5 s later (section 14).
   - `sweep` and `e2e` (profile `tools`): run on demand with `docker compose run --rm …`. The e2e
     runs as a container so it can reach each copy by name: Anna and Cara on `snap-api-1`
     (`E2E_BASE_URL`), Ben and Dave on `snap-api-2` (`E2E_OTHER_URL`).
-- [ ] `infra/traefik/`: the static settings (entry point, timeouts), mounted read-only.
-- [ ] App: `EXPO_PUBLIC_API_URL=http://<your-ip>:8080`.
+- [x] `infra/traefik/`: the static settings (entry point, timeouts), mounted read-only.
+- [ ] App: `EXPO_PUBLIC_API_URL=http://<your-ip>:8080`. *Devinder's phone check — the stack
+      side was tested with a phone-like socket client (below).*
 
 ✅ **Done when:**
 - From nothing, `docker compose up -d` → `docker compose ps` shows `migrate` exited 0, 3 api
@@ -949,6 +949,32 @@ its own to a new api container 2.5 s later (section 14).
   Traefik to another copy, and that copy's realtime queue disappears; `docker compose up -d`
   brings the third copy back with a new queue.
 - `docker compose run --rm sweep` runs the sweep once, successfully.
+
+**Result (2026-11-17):** `compose.stack.yml` with `traefik:v3.7.15` (newest v3 at the time),
+`migrate`, `api` ×3, `worker`, and `sweep`/`e2e` on the `tools` profile; the backend services
+share `backend/.env` through a YAML anchor, with `DATABASE_URL`/`RABBITMQ_URL` pointed at the
+service names. The api health check is `bun -e "fetch('/health')"` — the image has no `curl`.
+`infra/traefik/traefik.yml`: entry point `:80` with **`readTimeout: 300s`** (Traefik's default
+of 60 s covers the whole request body and would cut off a 10 MB snap on a slow phone
+connection), Docker provider with `exposedByDefault: false`, the dashboard on
+`127.0.0.1:8081`, an access log. Traefik has no request-size limit by default; Fastify's
+10 MB limit stays the only one. Tested: from no stack containers, `up -d --build` → `migrate`
+exited 0, 3 api copies healthy, the worker running, Traefik routing to 3 servers (UP UP UP).
+e2e through Traefik **67 of 67**, the requests spread 19 / 20 / 19 over the copies; e2e as a
+container with Anna on `snap-api-1` and Ben on `snap-api-2` **67 of 67**. RabbitMQ: three
+`realtime.*` queues, connections from 3 `snap-api` and 1 `snap-worker`. A phone-like client
+connected through Traefik landed on `snap-api-3`; `docker kill snap-api-3` → `transport close`,
+reconnected by itself to `snap-api-1` 1.1 s later; Traefik down to 2 servers, 2 realtime
+queues. `docker kill` doesn't trigger the restart policy (it counts as a manual stop);
+`docker compose up -d` brought the copy back with a new queue (3 again — Traefik adds it a
+moment after Docker reports it healthy). A socket held open through Traefik for **240 s**:
+0 disconnects (past both the 60 s read and 180 s idle timeouts). A 9 MB upload throttled to
+100 KB/s took **88 s** and got 201 — the 60 s default would have cut it. `run --rm sweep`
+succeeded. The first attempt hit Docker Hub's anonymous limit (100 requests an hour, used up
+by checking image tags); logged in to Docker Hub, it pulled fine (section 14). Traefik logs two
+start-up warnings (encoded characters in paths, `aliasHeadersStrategy`), which concern backends
+that turn header names into variables (PHP, CGI) — to review in Step 10. Left for Devinder: the
+real phone check.
 
 ### Step 8 — ~~Kubernetes like production~~ (dropped in version 4)
 
@@ -1175,6 +1201,14 @@ afterwards.
 - **Don't end a socket.io session from the server on shutdown.** `disconnectSockets()` gives
   the phone `io server disconnect`, and socket.io-client then never reconnects by itself.
   Closing the connections (`engine.close()`) gives `transport close`, and it does (Step 6).
+- **Traefik's `readTimeout` defaults to 60 s for the whole request, body included** — a 10 MB
+  upload on a slow phone connection would be cut off. Set to 300 s (Step 7).
+- **Docker Hub limits anonymous requests to 100 an hour**, and every `docker manifest inspect`
+  or pull counts. Checking many image tags used it up mid-test (Step 7). Log in to Docker Hub
+  (`docker login`, or sign in to Docker Desktop); in CI, log in to ghcr.io / Docker Hub too.
+- **`docker kill` doesn't trigger `restart: unless-stopped`** — Docker treats it as a manual
+  stop. A copy whose process crashes on its own is restarted; one you kill stays down until
+  `docker compose up -d` (Step 7).
 
 ---
 

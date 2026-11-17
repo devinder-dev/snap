@@ -121,6 +121,10 @@ docker run --rm --network snap_default --env-file .env snap-tools          # mig
 api closes its sockets (phones reconnect to another copy), finishes open requests and
 closes RabbitMQ; the worker stops taking jobs and finishes the running ones.
 
+Usually you don't run these by hand: `compose.stack.yml` in the repo root starts the
+whole stack — Traefik, the migrations, three api copies and the worker — with the
+right names and settings (see the root README).
+
 ## Layout
 
 ```

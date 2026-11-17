@@ -138,5 +138,22 @@ cp .env.example .env                  # EXPO_PUBLIC_API_URL = your computer's LA
 bun install && bunx expo start        # scan the QR code with Expo Go
 ```
 
+### The whole stack in containers — three copies behind Traefik
+
+The same `backend/.env`, but everything runs in Docker: Traefik in front, three api copies,
+the worker, and the migrations before them.
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:compose.stack.yml
+docker compose up -d --build          # API through Traefik: http://localhost:8080
+docker compose ps                     # 3 api copies, healthy; the worker; migrate exited 0
+docker compose run --rm e2e           # the e2e, Anna on copy 1 and Ben on copy 2
+docker kill snap-api-2                # fail a copy: its phones reconnect to another one
+docker compose up -d                  # bring it back
+```
+
+Point the app at it with `EXPO_PUBLIC_API_URL=http://<your LAN address>:8080`. Traefik's
+dashboard, showing which copies are live, is at http://localhost:8081.
+
 More detail: [backend/README.md](backend/README.md) (HTTP API, realtime events, snap expiry) and
 [snap/README.md](snap/README.md) (app architecture).

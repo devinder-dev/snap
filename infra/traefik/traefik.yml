@@ -1,0 +1,37 @@
+# Traefik's static settings for the laptop stack (compose.stack.yml).
+# SCALING-PLAN.md Step 7. Which copies get traffic is NOT written here: Traefik
+# reads it from the labels on the containers (the "docker" provider below).
+
+entryPoints:
+  # Everything from outside comes in here: port 80 inside the container,
+  # 8080 on the laptop.
+  web:
+    address: ":80"
+    transport:
+      respondingTimeouts:
+        # The longest Traefik waits to read a whole request, body included.
+        # The default of 60 s would cut off a 10 MB snap sent over a slow
+        # phone connection (anything under about 1.4 Mbit/s).
+        readTimeout: 300s
+
+providers:
+  docker:
+    # Only containers labelled traefik.enable=true get traffic, never
+    # Postgres, RabbitMQ or anything else that happens to run.
+    exposedByDefault: false
+    # The compose network where Traefik reaches the api copies.
+    network: snap_default
+
+# The dashboard: which routers and copies are live right now. Port 8080 inside
+# the container, 127.0.0.1:8081 on the laptop. "insecure" means no login, which
+# is fine on the laptop and never on a server.
+api:
+  dashboard: true
+  insecure: true
+
+# One line per request, naming the copy that answered — so you can watch the
+# requests being spread over the copies with `docker compose logs traefik`.
+accessLog: {}
+
+log:
+  level: INFO
