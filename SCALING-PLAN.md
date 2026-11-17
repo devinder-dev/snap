@@ -1,9 +1,9 @@
 # Snap — scaling plan: several servers, RabbitMQ and Kubernetes
 
-Status: **Step 2 done** (2026-11-17). The app is finished and runs on one server, on its own
-S3 bucket, with a committed end-to-end test. The backend connects to RabbitMQ and declares every
-exchange and queue from section 5, but doesn't publish events yet (that's Step 3). Steps 3–12
-are not started. On 2026-10-07 the plan
+Status: **Step 3 done** (2026-11-17). The app runs on its own S3 bucket, with a committed
+end-to-end test, and several copies of the backend can now run side by side: every live push
+goes through RabbitMQ, and each copy's relay delivers it to the phones connected there. Nothing
+reads the snap timer yet (that's Step 4). Steps 4–12 are not started. On 2026-10-07 the plan
 changed to run on **Kubernetes** — section 0 says what was planned before, what changes, and why.
 Verified beforehand: `amqplib` 2.2 works under Bun 1.3.14, and every RabbitMQ feature used
 below (topic routing, alternate exchange, TTL → dead-letter timer, nack → dead-letter queue)
@@ -127,7 +127,7 @@ and documented well enough that someone who has never seen it understands it in 
 | 0 | Public repo, own S3 account, end-to-end test back | ✅ 2026-10-17 |
 | 1 | RabbitMQ running | ✅ 2026-10-21 |
 | 2 | Queue module | ✅ 2026-11-17 |
-| 3 | Live pushes across servers | ⬜ |
+| 3 | Live pushes across servers | ✅ 2026-11-17 |
 | 4 | Worker + snap timer | ⬜ |
 | 5 | Retries, dead letters, alternate exchange | ⬜ |
 | 6 | Docker image | ⬜ |
@@ -734,18 +734,31 @@ at boot. `SNAP_TTL_MS=20000` against the existing 24 h queue → 406, exit 1. `b
 
 ### Step 3 — Live pushes across servers
 
-- [ ] `websocket/controllers.ts`: each `send…Notification` publishes its event instead of emitting.
-- [ ] `services.sendSnap`: one `snap.created` with `recipients` (not one per recipient).
-- [ ] `websocket/relay.ts`: declare `realtime.<INSTANCE_ID>-<random>` (exclusive), bind
+- [x] `websocket/controllers.ts`: each `send…Notification` publishes its event instead of emitting.
+- [x] `services.sendSnap`: one `snap.created` with `recipients` (not one per recipient).
+- [x] `websocket/relay.ts`: declare `realtime.<INSTANCE_ID>-<random>` (exclusive), bind
       `message.*`, `snap.*`, `friend.*`, consume, emit to local rooms, ack. Re-create on reconnect.
-- [ ] Publishing waits for the relay: `publishEvent` drops (and logs) until this copy's queue is
+- [x] Publishing waits for the relay: `publishEvent` drops (and logs) until this copy's queue is
       bound, so startup and reconnects never send real events to `snap.unrouted`.
-- [ ] `scripts/e2e.ts`: accept two base URLs.
+- [x] `scripts/e2e.ts`: accept two base URLs.
 
 ✅ **Done when:** two copies run side by side (`PORT=3000 bun run dev`, `PORT=3001 bun run dev`),
 the e2e test connects Anna to :3000 and Ben to :3001, and every push (message, snap, friend
 request, friend accepted, screenshot) arrives on the other server. Web UI shows two
 `realtime.*` queues.
+
+**Result (2026-11-17):** `controllers.ts` now has two halves: `send…Notification` publishes
+(called by services), `emitEvent` emits (called by the relay), typed against the `Events` map so
+a new event without an emitter doesn't compile. Every push goes through RabbitMQ, even between
+two people on the same copy. The relay starts from `connectQueue`'s new `onConnect` hook, which
+runs after the topology and before the publish channel opens; that ordering is how publishing
+waits for the relay. The second URL is `E2E_OTHER_URL`: Ben and Dave use it, Anna and Cara
+`E2E_BASE_URL`. Tested: one server → e2e 67 of 67; two servers → two `realtime.*` queues, e2e
+67 of 67 with every push crossing, `snap.unrouted.queue` still 0, `snap.expiry.wait` +2 (the
+timers, read from Step 4). RabbitMQ restarted, or the connection force-closed in the web UI →
+the relay comes back on a new queue within about 2 s, and e2e passes 67 of 67 again. Stopped
+copies leave no `realtime.*` queue behind. Found on the way: nobody but the owner can delete
+an exclusive queue, not even the web UI (400 "cannot obtain exclusive access").
 
 ### Step 4 — Worker + snap timer
 

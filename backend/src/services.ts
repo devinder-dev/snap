@@ -167,10 +167,9 @@ export async function sendSnap(input: SendSnapInput): Promise<SendSnapResponse> 
     }
 
     // Notify last, once the snap is durable. A recipient who is offline finds it
-    // through GET /snaps instead, so a missed emit costs nothing.
-    for (const recipient of new Set(recipients)) {
-        websocket.sendSnapNotification(recipient, createdSnap, senderUsername)
-    }
+    // through GET /snaps instead, so a missed push costs nothing. One event for
+    // all recipients: it also starts the snap's one timer.
+    websocket.sendSnapNotification(createdSnap, senderUsername, [...new Set(recipients)])
 
     return {
         snap_id: createdSnap.id,

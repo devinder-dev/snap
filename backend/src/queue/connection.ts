@@ -1,4 +1,4 @@
-import { connect, type ChannelModel, type ConfirmChannel, type RecoveringChannelModel } from 'amqplib'
+import { connect, type Channel, type ChannelModel, type ConfirmChannel, type RecoveringChannelModel } from 'amqplib'
 import { config } from '../config'
 import { declareTopology } from './topology'
 
@@ -7,10 +7,15 @@ import { declareTopology } from './topology'
 // 4 s … up to 30 s between tries, each a little random, so several API copies
 // that lost RabbitMQ at the same moment don't all knock at the same instant.
 //
-// What recovery does NOT do is bring back channels — they die with the old
-// connection. So setup() below runs after every successful connect: it opens a
-// fresh confirm channel and declares the topology again, which also rebuilds a
-// RabbitMQ that came back empty.
+// What recovery does NOT do is bring back channels or consumers — they die with
+// the old connection. So setup() below runs after every successful connect: it
+// opens a fresh confirm channel, declares the topology again (which also
+// rebuilds a RabbitMQ that came back empty), and starts this process's own
+// consumers again: the API's relay, and from Step 4 the worker.
+
+// Starts a process's consumers on a fresh connection. Runs on every
+// (re)connect, after the topology exists and before publishing opens.
+export type OnConnect = (model: ChannelModel) => Promise<void>
 
 // The kinds of error amqplib hands us. `code` is a string for network errors
 // ('ECONNREFUSED', with an empty message) and a number for an AMQP refusal
@@ -27,7 +32,7 @@ export function getPublishChannel(): ConfirmChannel | null {
 }
 
 // `clientName` shows in the web UI's Connections tab, e.g. snap-api@<pod name>.
-export async function connectQueue(clientName: string): Promise<void> {
+export async function connectQueue(clientName: string, onConnect?: OnConnect): Promise<void> {
     connection = await connect(config.rabbitmqUrl, {
         clientProperties: { connection_name: `${clientName}@${config.instanceId}` },
         recovery: {
@@ -40,27 +45,23 @@ export async function connectQueue(clientName: string): Promise<void> {
             // Runs after every successful (re)connect, before 'connect' fires. If
             // it throws, amqplib closes that connection and tries again later.
             async setup(model: ChannelModel) {
+                // Step 1: The channel to publish on, in confirm mode.
                 const channel = await model.createConfirmChannel()
-
-                // A channel error with no listener crashes the whole process.
-                // 'close' always follows, and that's where we act.
-                channel.on('error', (err: AmqpError) => {
-                    console.warn(`RabbitMQ channel error: ${describe(err)}`)
-                })
-
+                watchChannel(model, channel, 'publish')
                 channel.on('close', () => {
-                    if (channel !== publishChannel) return
-                    publishChannel = null
-
-                    // The channel can die while the connection is fine — say
-                    // someone deleted snap.events in the web UI and the next
-                    // publish hit the hole. Recovery only watches the connection,
-                    // so close it too: amqplib reconnects and setup() rebuilds
-                    // everything. If the connection is already gone this is a no-op.
-                    if (!stopping) model.close().catch(() => {})
+                    if (channel === publishChannel) publishChannel = null
                 })
 
+                // Step 2: Every exchange, queue and binding from section 5.
                 await declareTopology(channel)
+
+                // Step 3: This process's consumers, BEFORE publishing opens. An
+                // event published before this copy's realtime queue is bound
+                // could match no binding at all and land in snap.unrouted,
+                // which is there to catch typos, not real events.
+                if (onConnect) await onConnect(model)
+
+                // Step 4: Open for publishing.
                 publishChannel = channel
             },
         },
@@ -105,7 +106,25 @@ function onConnectFailed(err: AmqpError): void {
     console.warn(`⚠️ RabbitMQ connect failed: ${describe(err)}`)
 }
 
-// Stops recovery and closes the connection; its channel goes with it.
+// Every channel gets this, the publish channel and each consumer's.
+//
+// A channel error with no listener crashes the whole process; 'close' always
+// follows, and that's where we act. A channel can die while the connection is
+// fine: say someone deleted snap.events in the web UI and the next publish hit
+// the hole. Recovery only watches the connection, so close it too: amqplib
+// reconnects and setup() rebuilds everything. If the connection is already
+// gone this is a no-op.
+export function watchChannel(model: ChannelModel, channel: Channel, name: string): void {
+    channel.on('error', (err: AmqpError) => {
+        console.warn(`⚠️ RabbitMQ ${name} channel error: ${describe(err)}`)
+    })
+
+    channel.on('close', () => {
+        if (!stopping) model.close().catch(() => {})
+    })
+}
+
+// Stops recovery and closes the connection; its channels go with it.
 export async function closeQueue(): Promise<void> {
     stopping = true
     publishChannel = null

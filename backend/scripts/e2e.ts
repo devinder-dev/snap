@@ -13,6 +13,13 @@
 //   bun run dev                 # in one terminal
 //   bun run e2e                 # in another
 //   E2E_BASE_URL=http://localhost:3001 bun run e2e
+//
+// Two servers (live pushes across RabbitMQ): start a second copy with
+// PORT=3001 and set E2E_OTHER_URL. Ben and dave then talk to the second
+// server and anna and cara to the first, so every push between anna and ben
+// only arrives if it crossed RabbitMQ.
+//
+//   E2E_OTHER_URL=http://localhost:3001 bun run e2e
 
 import { sql } from 'bun'
 import { io, type Socket } from 'socket.io-client'
@@ -20,6 +27,7 @@ import * as services from '../src/services'
 import * as s3 from '../src/utils/s3'
 
 const BASE_URL = (process.env.E2E_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '')
+const OTHER_URL = (process.env.E2E_OTHER_URL ?? BASE_URL).replace(/\/$/, '')
 
 const run = crypto.randomUUID().slice(0, 6)
 const users = {
@@ -28,6 +36,18 @@ const users = {
     cara: `zzt_${run}_cara`,
     dave: `zzt_${run}_dave`,
 }
+
+// Which server each user talks to, for HTTP and socket alike.
+const serverOf: Record<keyof typeof users, string> = {
+    anna: BASE_URL,
+    ben: OTHER_URL,
+    cara: BASE_URL,
+    dave: OTHER_URL,
+}
+
+// Filled at registration: a request carrying a user's token goes to that
+// user's server. Requests without one (register, login) go to BASE_URL.
+const serverByToken = new Map<string, string>()
 const PASSWORD = 'correct horse battery staple'
 
 // A 1×1 PNG. The server checks the declared type, not the pixels.
@@ -79,7 +99,8 @@ async function api(
         body = options.form
     }
 
-    const response = await fetch(`${BASE_URL}${path}`, { method, headers, body })
+    const server = serverByToken.get(options.token ?? '') ?? BASE_URL
+    const response = await fetch(`${server}${path}`, { method, headers, body })
     const text = await response.text()
 
     let parsed: unknown = undefined
@@ -111,7 +132,8 @@ function connect(token: string): Promise<Socket> {
     return new Promise((resolve, reject) => {
         // WebSocket only, like the app — and no automatic reconnect, so a refused
         // handshake fails here instead of retrying forever.
-        const socket = io(BASE_URL, { transports: ['websocket'], auth: { token }, reconnection: false })
+        const server = serverByToken.get(token) ?? BASE_URL
+        const socket = io(server, { transports: ['websocket'], auth: { token }, reconnection: false })
         socket.once('connect', () => resolve(socket))
         socket.once('connect_error', (error) => {
             socket.close()
@@ -153,7 +175,9 @@ const sockets: Record<string, Socket> = {}
 const daveReceived: string[] = []
 let firstSnapUrl: string | undefined
 
-console.log(`e2e against ${BASE_URL} — run ${run}`)
+console.log(OTHER_URL === BASE_URL
+    ? `e2e against ${BASE_URL} — run ${run}`
+    : `e2e against ${BASE_URL} (anna, cara) and ${OTHER_URL} (ben, dave) — run ${run}`)
 
 try {
     section('Health')
@@ -170,7 +194,12 @@ try {
                 && typeof res.body?.tokens?.access_token === 'string'
                 && typeof res.body?.tokens?.refresh_token === 'string'
             check(`${name} registers (201, both tokens)`, ok, res)
-            if (ok) tokens[name] = { access: res.body.tokens.access_token, refresh: res.body.tokens.refresh_token }
+            if (ok) {
+                tokens[name] = { access: res.body.tokens.access_token, refresh: res.body.tokens.refresh_token }
+                const server = serverOf[name as keyof typeof users]
+                serverByToken.set(res.body.tokens.access_token, server)
+                serverByToken.set(res.body.tokens.refresh_token, server)
+            }
         }
         if (Object.keys(tokens).length < 4) throw new Error('Registration failed — nothing else can run')
 

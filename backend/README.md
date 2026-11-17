@@ -17,6 +17,10 @@ bun run e2e                 # in a second terminal: the whole API end to end
 socket.io for pushes — with four throwaway `zzt_…` users and a real S3 upload,
 then deletes all of it. Point it elsewhere with `E2E_BASE_URL`.
 
+Two servers, to check live pushes cross RabbitMQ: start a second copy with
+`PORT=3001 bun run dev`, then `E2E_OTHER_URL=http://localhost:3001 bun run e2e`.
+Ben and Dave use the second server, Anna and Cara the first.
+
 `bun run migrate status` / `bun run migrate rollback` pass straight through to dbmate.
 The script adds `sslmode=disable` for dbmate only; the app's `DATABASE_URL` stays as is.
 
