@@ -3,13 +3,14 @@
 A Snapchat-style app: send photo and text snaps that can be viewed once and disappear after
 24 hours, chat with friends, and get every update live.
 
-**Expo (React Native) · Bun · Fastify · PostgreSQL · AWS S3 · socket.io** — and, in progress,
-**RabbitMQ · Docker · Kubernetes** to run the backend as several copies at once.
+**Expo (React Native) · Bun · Fastify · PostgreSQL · AWS S3 · socket.io · RabbitMQ** — and, in
+progress, **Docker · Traefik** to run the backend as three copies behind one address.
 
-> **Status:** the app works end to end on one server. Now it's being scaled out to several
-> copies on Kubernetes, with RabbitMQ carrying live events and background jobs between them —
-> step by step, each step tested before the next. The full plan and progress are in
-> **[SCALING-PLAN.md](SCALING-PLAN.md)**.
+> **Status:** the app works end to end, and the backend can already run as several copies side
+> by side: live pushes cross between them through RabbitMQ, and a worker deletes each snap when
+> its 24-hour timer runs out. Next come retries and dead letters, then Docker, three copies
+> behind Traefik, CI and a deploy to one server — step by step, each step tested before the
+> next. The full plan and progress are in **[SCALING-PLAN.md](SCALING-PLAN.md)**.
 
 ## What it does
 
@@ -23,7 +24,7 @@ A Snapchat-style app: send photo and text snaps that can be viewed once and disa
   WebSocket. The socket only *announces*; all data comes over HTTP, so a missed push is never
   lost data — the app refetches whenever it reconnects.
 
-## Architecture today — one server
+## Where it started — one server
 
 ```mermaid
 flowchart LR
@@ -37,14 +38,14 @@ flowchart LR
 This can't simply be copied onto more servers: each user's socket lives in **one** server's
 memory, so a message saved by server 1 can't be pushed to someone connected to server 2.
 
-## Where it's going — several copies on Kubernetes
+## Where it's going — three copies behind Traefik
 
 ```mermaid
 flowchart TB
-    app["Expo app"] -->|"HTTPS + WebSocket"| lb["Kubernetes Gateway + Service"]
-    lb --> api1["api pod 1"]
-    lb --> api2["api pod 2"]
-    lb --> api3["api pod 3"]
+    app["Expo app"] -->|"HTTPS + WebSocket"| lb["Traefik"]
+    lb --> api1["api copy 1"]
+    lb --> api2["api copy 2"]
+    lb --> api3["api copy 3"]
     api1 <--> mq["RabbitMQ"]
     api2 <--> mq
     api3 <--> mq
@@ -55,13 +56,13 @@ flowchart TB
     api3 --> data
 ```
 
-Every api pod is identical and keeps no state of its own. After each write it publishes an
-event; RabbitMQ hands a copy to every pod, and whichever one holds the recipient's socket
+Every api copy is identical and keeps no state of its own. After each write it publishes an
+event; RabbitMQ hands a copy to every api copy, and whichever one holds the recipient's socket
 pushes it. No sticky sessions needed — the app connects over WebSocket only.
 
-Kubernetes runs the pods: it restarts any that die, replaces them one by one on a new version,
-and adds pods under load (2–6). It doesn't know which pod holds whose socket — that's
-RabbitMQ's job.
+docker compose runs everything on one server: it restarts a copy that crashes, and Traefik only
+sends traffic to the copies that are healthy. Neither knows which copy holds whose socket —
+that's RabbitMQ's job. (Why docker compose and not Kubernetes: section 0 of the plan.)
 
 ### Following one message across servers
 
@@ -115,7 +116,7 @@ so a lost or dead-lettered job never leaves a photo behind.
 backend/          Fastify API on Bun — routes, services, Postgres repository, S3, socket.io
   db/migrations/  SQL migrations (dbmate)
 snap/             Expo app (SDK 54, expo-router) — runs in Expo Go
-SCALING-PLAN.md   The scaling plan: design, RabbitMQ topology, Kubernetes, steps and progress
+SCALING-PLAN.md   The scaling plan: design, RabbitMQ topology, docker compose, steps and progress
 ```
 
 ## Run it locally
@@ -129,7 +130,8 @@ cd backend
 cp .env.example .env                  # DATABASE_URL, RABBITMQ_URL, JWT_SECRET_KEY, S3_*
 bun install && bun run migrate
 bun run dev                           # http://localhost:3000
-bun run e2e                           # in a second terminal: 67 end-to-end checks
+bun run worker                        # in a second terminal: deletes snaps when their 24 h are up
+bun run e2e                           # in a third terminal: 67 end-to-end checks
 
 cd ../snap
 cp .env.example .env                  # EXPO_PUBLIC_API_URL = your computer's LAN address
