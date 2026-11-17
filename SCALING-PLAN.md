@@ -1,13 +1,19 @@
-# Snap — scaling plan: several servers, RabbitMQ and Kubernetes
+# Snap — scaling plan: several servers and RabbitMQ
 
-Status: **Step 3 done** (2026-11-17). The app runs on its own S3 bucket, with a committed
-end-to-end test, and several copies of the backend can now run side by side: every live push
-goes through RabbitMQ, and each copy's relay delivers it to the phones connected there. Nothing
-reads the snap timer yet (that's Step 4). Steps 4–12 are not started. On 2026-10-07 the plan
-changed to run on **Kubernetes** — section 0 says what was planned before, what changes, and why.
+Status: **Step 3 done** (2026-11-17), **plan version 4** (2026-11-17). The app runs on its own
+S3 bucket, with a committed end-to-end test, and several copies of the backend can now run side
+by side: every live push goes through RabbitMQ, and each copy's relay delivers it to the phones
+connected there. Nothing reads the snap timer yet (that's Step 4). Steps 4–12 are not started
+(Step 8 was dropped). Version 4 runs the copies with **docker compose behind Traefik** instead
+of Kubernetes — section 0 says what changed and why.
 Verified beforehand: `amqplib` 2.2 works under Bun 1.3.14, and every RabbitMQ feature used
 below (topic routing, alternate exchange, TTL → dead-letter timer, nack → dead-letter queue)
 was tested against RabbitMQ 4.
+
+**Continuing from here:** the roadmap (section 1) shows the next open step; its checklist and
+"Done when" are in section 12. After every step: run its test, review it, then update the status
+line, the roadmap row and the step's checkboxes plus a short **Result** note, then commit and
+push.
 
 ---
 
@@ -20,6 +26,50 @@ was tested against RabbitMQ 4.
 | 3 | 2026-10-07 | + **Kubernetes**: the copies run in a Kubernetes cluster instead of docker compose + nginx |
 | 3.1 | 2026-10-17 | Security scans: GitHub's CodeQL + Dependabot in CI instead of Snyk |
 | 3.2 | 2026-10-21 | Local Docker setup: Snap's own Postgres, ports for this laptop only |
+| 4 | 2026-11-17 | **docker compose + Traefik** instead of Kubernetes for Steps 6–12; Step 8 dropped |
+
+### Version 4 — docker compose instead of Kubernetes (2026-11-17)
+
+**Why:** Kubernetes is already shown in another project of mine, Relay (k3s on a VPS, CI/CD,
+probes, zero-downtime and rollback tests, autoscaling). Doing it a second time here would mostly
+repeat the same lessons. What only Snap shows is the realtime part: live sockets across several
+copies, RabbitMQ fan-out per copy, retries and dead letters, and a copy dying mid-chat. So
+Steps 3–5 stay exactly as planned, and the copies run with docker compose behind Traefik —
+enough to prove the scaling, with much less to build and host. Each project now proves
+something different.
+
+**What we give up:** copies spread over several machines, autoscaling, PodDisruptionBudgets,
+Gateway API, and a Kubernetes cluster in CI. Everything runs on one machine, so "a copy dies"
+means a process dies, not a server. The Docker image and graceful shutdown from Step 6 make
+moving to Kubernetes later a move, not a rewrite (section 15).
+
+| Topic | Before (version 3) | After (version 4) | Why |
+|---|---|---|---|
+| Running 3 copies | Kubernetes Deployment, `replicas: 3` | docker compose, `deploy.replicas: 3` | Enough to prove pushes cross copies |
+| Load balancer | Service + Gateway API (Traefik) | A **Traefik** container with its Docker provider | Finds the copies through Docker as they start and stop (nginx resolves the names once, at startup); passes WebSockets as they are; gets Let's Encrypt certificates itself (Step 11); already known from Relay |
+| A copy hangs | Liveness probe restarts it | Compose `healthcheck` on `/health`; Traefik stops sending traffic to an unhealthy copy | Docker restarts a copy that crashes, not one that only hangs (section 14) |
+| How many copies | Autoscaler, 2–6 | Always 3 | Autoscaling is shown in Relay |
+| New version | Rolling update | Own deploy script in Step 11: start new copies, wait until healthy, stop the old ones | Compose has no rolling update; doing it by hand shows what one is |
+| Hourly sweep | Kubernetes CronJob | `docker compose run --rm sweep`, run hourly by cron on the server | Still runs once an hour however many workers there are |
+| Migrations | Kubernetes Job | A `migrate` service; the api waits for it (`service_completed_successfully`) | Same order, compose's own way |
+| Secrets | Kubernetes Secret + ConfigMap | `backend/.env` on the laptop, a `.env` file on the server (mode 600) | Never committed, as before |
+| Postgres, RabbitMQ | StatefulSets with volumes | Compose services with volumes (as today) | Already works |
+| Several copies on the laptop | kind, 3 nodes | The same compose files as the server, plus override files | One tool from laptop to server |
+| CI | kind cluster in GitHub Actions, e2e as a Job | The whole stack in compose in GitHub Actions, e2e as a container on its network | Still proves every push crosses copies, without a cluster |
+| Image targets | `app` + `migrate` | `app` + `tools` (dev dependencies: dbmate for migrations, socket.io-client for the e2e) | The e2e must run inside the compose network in CI, so it needs an image too |
+| Hosting | A Kubernetes cluster | **One VPS** with docker compose; provider chosen at Step 11 | Cheapest; nothing before Step 11 depends on it |
+| HTTPS | cert-manager | Traefik's built-in Let's Encrypt | One moving part fewer |
+
+| Steps before (version 3) | Steps after (version 4) |
+|---|---|
+| 0–5 | 0–5, unchanged (0–3 already done) |
+| 6 Docker image | 6, with a `tools` target instead of `migrate` |
+| 7 Kubernetes on the laptop (kind) | 7 Several copies on the laptop: docker compose + Traefik |
+| 8 Kubernetes like production | **Dropped** — what's useful without Kubernetes moved to Steps 9, 11 and 12 |
+| 9 CI/CD with a kind cluster | 9 CI/CD with the whole stack in compose |
+| 10 Ready for the public internet | 10, unchanged apart from wording |
+| 11 Deploy to a real Kubernetes cluster | 11 Deploy to one VPS with docker compose |
+| 12 Proof, with the autoscaler | 12 Proof: 1 copy vs 3, failover time |
 
 ### Version 3.2 — local Docker setup (2026-10-21)
 
@@ -40,6 +90,8 @@ Step 0 ran no scan: its changes (env vars in `s3.ts`, `/health`, the e2e script)
 little to find. The older code (login, tokens, uploads) gets its first scan from CodeQL in Step 9.
 
 ### Version 3 — Kubernetes (2026-10-07)
+
+*Replaced by version 4 for Steps 6–12. Kept as history.*
 
 **Why:** to learn Kubernetes. It's what most companies run their services on, and "I deployed a
 scaled app on Kubernetes" is a stronger interview story than "I ran docker compose".
@@ -113,11 +165,12 @@ and documented well enough that someone who has never seen it understands it in 
 | Scaling a realtime (stateful) service horizontally | The relay over RabbitMQ — the app doesn't change at all (Step 3) |
 | Message-broker patterns | Topic routing, alternate exchange, TTL timer, retries, dead letters (Steps 4–5) |
 | Reliability thinking | At-least-once + idempotency, ack after work, safety net, API survives a RabbitMQ outage (section 9) |
-| Containers and Kubernetes | Dockerfile; Deployments, Services, Gateway API, probes, StatefulSets, Jobs, CronJobs, Secrets (Steps 6–7) |
-| Operating on Kubernetes | Rolling updates without downtime, autoscaling, resource limits, copies spread over nodes (Step 8) |
-| Failure testing | Delete a pod, kill RabbitMQ, break the S3 key — and watch it recover (section 13) |
-| CI/CD with real dependencies | Every push: a Kubernetes cluster in GitHub Actions, three API copies, RabbitMQ, the e2e inside it (Step 9) |
-| Running it for real | HTTPS, secrets, logs, real numbers from a load test (Steps 10–12) |
+| Containers | One image for api, worker and sweep; graceful shutdown; health checks; 3 copies behind Traefik (Steps 6–7) |
+| Failure testing | Kill a copy mid-chat, stop RabbitMQ, break the S3 key — and watch it recover (section 13) |
+| CI/CD with real dependencies | Every push: the whole stack in GitHub Actions, three API copies, RabbitMQ, the e2e across copies (Step 9) |
+| Running it for real | HTTPS, secrets, logs, backups, a deploy without downtime done by hand, real numbers from a load test (Steps 10–12) |
+
+Kubernetes is shown in another project (Relay). Here the point is the realtime scaling itself.
 
 ### Roadmap
 
@@ -131,11 +184,11 @@ and documented well enough that someone who has never seen it understands it in 
 | 4 | Worker + snap timer | ⬜ |
 | 5 | Retries, dead letters, alternate exchange | ⬜ |
 | 6 | Docker image | ⬜ |
-| 7 | Kubernetes on the laptop (kind) | ⬜ |
-| 8 | Kubernetes like production: rolling updates, autoscaling, limits | ⬜ |
+| 7 | Several copies on the laptop: docker compose + Traefik | ⬜ |
+| 8 | ~~Kubernetes like production~~ | Dropped in version 4 |
 | 9 | CI/CD on every push | ⬜ |
 | 10 | Ready for the public internet | ⬜ |
-| 11 | Deploy to a real Kubernetes cluster | ⬜ |
+| 11 | Deploy to one VPS with docker compose | ⬜ |
 | 12 | Proof and presentation | ⬜ |
 
 After every step: run its end-to-end test, review it together, then commit and push.
@@ -149,18 +202,17 @@ After every step: run its end-to-end test, review it together, then commit and p
 | Background jobs | **Separate worker process** | Scales and restarts independently of the API |
 | Photo uploads | **Unchanged** (`POST /snaps` multipart through the API) | The API contract must not change |
 | Cross-server pushes | **Own relay over RabbitMQ**, not the socket.io Redis adapter | Only one file emits today, so it's a small change — and it's RabbitMQ we're learning |
-| Snap expiry | **RabbitMQ timer** (TTL → dead-letter) + **hourly safety-net sweep** (a Kubernetes CronJob) | Exact timing from the timer, guaranteed cleanup from the sweep. Honest trade-off: the indexed sweep alone would do the job — the timer is here to learn TTL and dead-lettering |
-| App changes | **None**, except pointing `EXPO_PUBLIC_API_URL` at the Gateway | Socket events stay exactly the same |
+| Snap expiry | **RabbitMQ timer** (TTL → dead-letter) + **hourly safety-net sweep** (run by cron on the server) | Exact timing from the timer, guaranteed cleanup from the sweep. Honest trade-off: the indexed sweep alone would do the job — the timer is here to learn TTL and dead-lettering |
+| App changes | **None**, except pointing `EXPO_PUBLIC_API_URL` at Traefik | Socket events stay exactly the same |
 | Code on GitHub | **Public repo `devinder-dev/snap`**, committed step by step | The history shows how it was built |
 | S3 account | **Own AWS account**, IAM user with object-only access | The course bucket's key has to be replaced anyway (section 10) |
 | S3 in CI | **Local S3 stand-in** through `S3_ENDPOINT` | CI never holds real AWS keys |
-| Running the copies | **Kubernetes** (section 0) | To learn it; it restarts, load-balances, rolls out and scales the copies |
-| Kubernetes on the laptop | **kind** CLI with `infra/kind-cluster.yaml` (3 nodes: 1 control plane, 2 workers) — not Docker Desktop's built-in cluster | Runs in Docker, which we already have; the same file creates the same cluster in GitHub Actions. Tested 2026-10-07: Docker Desktop's cluster (kind inside, too) can't see images built on the laptop (`ErrImageNeverPull`), so every build would have to go through a registry — the kind CLI loads them directly |
-| Traffic into the cluster | **Gateway API** with **Traefik** | ingress-nginx is retired; Traefik is light, handles WebSockets with no extra setup, and is what k3s ships with |
-| Kubernetes files | **Plain YAML + Kustomize** (built into `kubectl`), no Helm at first | Learn the objects themselves before hiding them behind a chart |
-| Postgres + RabbitMQ in the cluster | **Own StatefulSets** with the official images | Learning; whether production keeps Postgres in the cluster is decided at Step 11 |
+| Running the copies | **docker compose**: 3 api copies + 1 worker (section 0, version 4) | Enough to prove the scaling; Kubernetes is shown in Relay |
+| Load balancer | **Traefik** with its Docker provider | Picks up copies as they start and stop, passes WebSockets, gets certificates itself; no sticky sessions needed (section 2) |
+| Compose files | **One base file + an override file per place** (laptop stack, CI, server), merged with `-f` | Each place changes only what differs — the same idea as Kustomize overlays |
+| Postgres + RabbitMQ | **Containers with volumes**, as today | Whether production keeps Postgres on the VPS (with backups) or uses a managed database is decided at Step 11 |
 | Image registry | **GitHub Container Registry** (ghcr.io), tagged with the commit SHA | Free for public repos, next to the code; never `latest` |
-| Hosting | **A Kubernetes cluster, provider chosen at Step 11** | Nothing before Step 11 depends on it, and the requirements are known by then |
+| Hosting | **One VPS, provider chosen at Step 11** | Nothing before Step 11 depends on it |
 
 ---
 
@@ -188,16 +240,16 @@ Step 0 rewrote it as a committed script, `bun run e2e` — 67 checks.
 
 | Integration | Used for | Today | Needed for scaling |
 |---|---|---|---|
-| Postgres 17 (Docker) | All data | ✅ | Shared by every copy. Bun pools ~10 connections per process; Postgres allows 100 by default — fine for up to 6 api pods + worker + sweep (~80) |
+| Postgres 17 (Docker) | All data | ✅ | Shared by every copy. Bun pools ~10 connections per process; Postgres allows 100 by default — fine for 3 api copies + worker + sweep (~50) |
 | AWS S3 | Snap photos | ✅ course bucket `fos25-snap` → own account in Step 0 | Nothing. Every copy uses the same bucket |
 | JWT | Auth | ✅ | Same `JWT_SECRET_KEY` on every copy. Stateless — nothing else |
 | socket.io | Live pushes | ✅ one copy only | ❌ rooms live in one process's memory → **RabbitMQ relay** |
 | RabbitMQ | Events + jobs | ❌ | **New** |
-| Kubernetes | Running, healing and scaling N copies | ❌ | **New** — kind on the laptop (Step 7), a real cluster later (Step 11) |
-| Gateway (Traefik) | Load balancer, traffic from outside | ❌ | **New** (must pass WebSockets, keep them open, allow 10 MB bodies) |
-| Backend Docker image | What every pod runs | ❌ | **New** `Dockerfile` + `.dockerignore`, pushed to ghcr.io |
-| Health route | Kubernetes probes checking a copy is alive | ✅ `GET /health` (Step 0) | Used by the liveness and readiness probes |
-| CI/CD | Testing every push in a real cluster | ❌ | **New** GitHub Actions + kind (Step 9) |
+| docker compose (whole stack) | Running, restarting and load-balancing N copies | ✅ Postgres + RabbitMQ only | **New** — 3 api copies + worker + Traefik (Step 7), the same on the server (Step 11) |
+| Traefik | Load balancer, traffic from outside | ❌ | **New** (must pass WebSockets, keep them open, allow 10 MB bodies) |
+| Backend Docker image | What every container runs | ❌ | **New** `Dockerfile` + `.dockerignore`, pushed to ghcr.io |
+| Health route | Checking a copy is alive | ✅ `GET /health` (Step 0) | The compose healthcheck; Traefik only sends traffic to healthy copies |
+| CI/CD | Testing every push with the whole stack | ❌ | **New** GitHub Actions + docker compose (Step 9) |
 
 ### Why one copy is the limit
 
@@ -216,40 +268,37 @@ connects with **WebSocket-only transport**, so the load balancer needs **no stic
 ```
                           Phones (Expo app)
                                  │  HTTPS + WebSocket
-┌────────────────────────────────┼──────── Kubernetes cluster, namespace "snap" ──────┐
+┌────────────────────────────────┼──────── one server, docker compose project "snap" ─┐
 │                                ▼                                                    │
-│                     ┌─────────────────────┐                                         │
-│                     │ Gateway  (Traefik)  │  traffic from outside                   │
-│                     └──────────┬──────────┘                                         │
-│                                ▼                                                    │
-│                     ┌─────────────────────┐                                         │
-│                     │  Service  "api"     │  spreads requests over the pods         │
-│                     └───┬───────┬──────┬──┘                                         │
-│                         ▼       ▼      ▼                                            │
-│   Deployment "api"   ┌─────┐ ┌─────┐ ┌─────┐   2–6 pods (autoscaler), identical,    │
-│   + autoscaler       │ pod │ │ pod │ │ pod │   no state of their own                │
-│                      └──┬──┘ └──┬──┘ └──┬──┘                                        │
-│      publish events ────┤       │       ├──── each reads its own realtime queue     │
-│                         ▼       ▼       ▼                                           │
+│                     ┌───────────────────────────┐                                   │
+│                     │          Traefik          │  HTTPS; spreads requests over     │
+│                     └───┬─────────┬─────────┬───┘  the healthy api copies           │
+│                         ▼         ▼         ▼                                       │
+│   service "api"     ┌───────┐ ┌───────┐ ┌───────┐   3 identical copies,             │
+│   3 replicas        │ api-1 │ │ api-2 │ │ api-3 │   no state of their own           │
+│                     └───┬───┘ └───┬───┘ └───┬───┘                                   │
+│      publish events ────┤         │         ├──── each reads its own realtime queue │
+│                         ▼         ▼         ▼                                       │
 │                    ┌──────────────────────┐        ┌───────────────────┐            │
-│   StatefulSet      │ RabbitMQ  (+ volume) │◀──────▶│ Deployment worker │ timer jobs,│
+│                    │ RabbitMQ  (+ volume) │◀──────▶│ worker            │ timer jobs,│
 │                    └──────────────────────┘        └───────────────────┘ retries    │
 │                                                                                     │
-│   StatefulSet      ┌──────────────────────┐   CronJob "sweep"   hourly safety net   │
-│                    │ Postgres  (+ volume) │   Job "migrate"     before each deploy  │
+│                    ┌──────────────────────┐   sweep     hourly safety net (cron)    │
+│                    │ Postgres  (+ volume) │   migrate   runs before the api starts  │
 │                    └──────────────────────┘                                         │
 └─────────────────────────────────────────────────────────────────────────────────────┘
-          api pods + worker + sweep ──▶ AWS S3 (outside the cluster)
+          api copies + worker + sweep ──▶ AWS S3 (outside the server)
 ```
 
-- **Gateway + Service** take the place of nginx: traffic comes in through the Gateway, and the
-  Service spreads it over whichever api pods are ready.
-- **API pods** handle HTTP and sockets, and *publish* an event after every write.
+- **Traefik** takes the place of nginx (version 1) and of the Gateway + Service (version 3):
+  traffic comes in through it, and it spreads requests over whichever api copies are healthy.
+- **API copies** handle HTTP and sockets, and *publish* an event after every write.
 - **RabbitMQ** copies each event to whoever needs it.
 - **Worker** does slow or scheduled work nobody should wait for.
 - **Postgres and S3** stay the source of truth. RabbitMQ never holds data we can't rebuild.
-- **Kubernetes** keeps the right number of each running, restarts what dies, and replaces
-  pods one by one when a new version is deployed.
+- **docker compose** starts the right number of each and restarts a copy that crashes. Unlike
+  Kubernetes it doesn't move copies to another machine or replace them one by one on a
+  deploy — Step 11 does that last part with a small script (section 4b).
 
 ---
 
@@ -293,32 +342,39 @@ The two fallbacks:
 
 ---
 
-## 4b. Kubernetes in five minutes
+## 4b. Several copies with docker compose
 
-**The one idea:** you write down what you *want* in YAML files ("3 copies of the api, a
-database with a 1 GB disk, …"), hand it over with `kubectl apply`, and Kubernetes keeps working
-until reality matches — and keeps checking forever. A pod dies → reality no longer matches →
-Kubernetes starts a new one. Everything below follows from that.
+*The Kubernetes version of this section (plan version 3) is in the git history.*
 
-| Kubernetes | In plain words | In Snap |
+**The one idea:** the compose files say what should run ("3 copies of the api, 1 worker,
+Traefik in front"), `docker compose up -d` starts it, and Docker keeps the containers running.
+It's the same "write down what you want" idea as Kubernetes, on one machine and with fewer
+guarantees.
+
+| docker compose | In plain words | In Snap |
 |---|---|---|
-| **Cluster** | The machines Kubernetes manages | On the laptop: kind — 3 Docker containers acting as 3 machines |
-| **Node** | One machine in the cluster | `snap-worker`, `snap-worker2` |
-| **Pod** | One running copy of a container — the smallest thing Kubernetes runs | One API copy |
-| **Deployment** | "Keep N identical pods running; on a new version, replace them one by one" | `api` (3), `worker` (1) |
-| **StatefulSet** | Like a Deployment, but each pod keeps its name and its own disk | `postgres-0`, `rabbitmq-0` |
-| **Service** | One stable name in front of a group of pods; spreads traffic over the ready ones | `api`, `postgres`, `rabbitmq` |
-| **Gateway + HTTPRoute** | The front door: which traffic from outside goes to which Service | `:8080` → Service `api` |
-| **ConfigMap / Secret** | Settings / passwords handed to pods as environment variables | `snap-config` / `snap-secrets` |
-| **PersistentVolumeClaim** | "I need a disk of this size that outlives the pod" | Postgres data, RabbitMQ data |
-| **Job / CronJob** | Run something to the end once / on a schedule | `migrate` / the hourly `sweep` |
-| **Probe** | Kubernetes asking a pod "are you alive?" (liveness) and "can you take traffic?" (readiness) | `GET /health` |
-| **HorizontalPodAutoscaler** | Changes a Deployment's number of pods based on load | api: 2–6, by CPU |
-| **Namespace** | A folder for everything that belongs to one app | `snap` |
+| **Service** | One kind of container and its settings | `api`, `worker`, `traefik`, `postgres`, `rabbitmq` |
+| **Replicas** (`deploy.replicas`) | How many identical containers of a service run | api: 3 |
+| **Container name** | `<project>-<service>-<n>`; other containers on the network can use it as a hostname | `snap-api-1`, `snap-api-2`, `snap-api-3` |
+| **Service name** | One hostname for a service, inside the compose network | `postgres`, `rabbitmq` in `DATABASE_URL` / `RABBITMQ_URL` |
+| **Healthcheck** | A command Docker runs every few seconds: healthy or not | `GET /health` |
+| **Restart policy** | Start the container again when its process exits | `unless-stopped` |
+| **`depends_on` + condition** | Start this after that one is healthy, or has finished | api waits for `migrate` to finish |
+| **Profile** | Services that only start when asked for by name | `sweep`, `e2e` |
+| **Override file** (`-f a.yml -f b.yml`) | A second file that changes only what differs | `compose.stack.yml`, `compose.ci.yml`, `compose.prod.yml` |
+| **Labels** | Notes on a container that other tools read | Traefik reads which port to send traffic to |
 
-How a request finds Ben's phone, in Kubernetes words: phone → **Gateway** → **Service** `api` →
-one of the **pods** → Postgres → event to RabbitMQ → every api **pod**'s realtime queue → the pod
-that holds Ben's socket pushes it.
+How a request finds Ben's phone: phone → **Traefik** → one of the **api copies** → Postgres →
+event to RabbitMQ → every api copy's realtime queue → the copy that holds Ben's socket pushes it.
+
+**What Kubernetes did that compose doesn't**, and how this plan handles it:
+
+| Kubernetes | docker compose | In this plan |
+|---|---|---|
+| Spreads copies over several machines | One machine | Accepted: a copy dying is a process dying, not a server |
+| Restarts a copy that hangs (liveness probe) | Restarts only a copy whose process exits | Traefik stops sending traffic to an unhealthy copy; restarting it is manual |
+| Rolling update: new copies healthy before old ones stop | Recreates the containers | Step 11's deploy script does it by hand |
+| Autoscaling | A fixed number | 3 copies; the load test compares 1 with 3 (Step 12) |
 
 ---
 
@@ -463,16 +519,17 @@ startup would fill `snap.unrouted.queue` with real events that only look like ty
 ### 7.5 An API copy dies
 
 ```
-api pod 2 crashes
-  → its phones' sockets drop → socket.io reconnects through the Gateway to pod 1 or pod 3
+api copy 2 crashes
+  → its phones' sockets drop → socket.io reconnects through Traefik to copy 1 or copy 3
   → the app gets `connected` → refetches lists (nothing lost)
-  → realtime.<pod-2>-<random> was exclusive → RabbitMQ deletes it automatically
-  → Kubernetes notices one pod is missing and starts a replacement
+  → realtime.<copy-2>-<random> was exclusive → RabbitMQ deletes it automatically
+  → Docker's restart policy starts the copy again (after a crash; not after `docker stop`)
   → it gets a NEW random suffix, so it never collides with the old queue
 ```
 
-The same thing happens, on purpose, during every **rolling update**: Kubernetes stops old pods
-one at a time, their sockets reconnect to the others, and the app refetches.
+The same thing happens, on purpose, during every deploy (Step 11): old copies stop one at a
+time after the new ones are healthy, their sockets reconnect to the others, and the app
+refetches.
 
 ### 7.6 RabbitMQ is down
 
@@ -516,12 +573,12 @@ is already invisible to users, and the hourly safety net deletes it once the cau
 6. **Never trust timing alone.** The worker re-checks `expires_at <= now()` in Postgres before
    deleting; a message that arrives early is acked and left to the safety net.
 7. **Graceful shutdown.** On `SIGTERM`: stop consuming, finish in-flight jobs, close channel and
-   connection. Kubernetes sends `SIGTERM` to every old pod on every deploy, then waits
-   `terminationGracePeriodSeconds` (30 s by default) before killing it.
-8. **Readiness never depends on a shared service.** If the readiness probe checked Postgres or
-   RabbitMQ, one blip would mark *every* pod unready at once and the Service would have nowhere
-   to send traffic — a full outage instead of a few errors. Both probes call `/health`, which
-   only asks "is this process up". (That's also why the API keeps serving when RabbitMQ is down,
+   connection. `docker stop`, and so every deploy, sends `SIGTERM`, then waits the grace period
+   (`stop_grace_period`, 10 s by default) before killing the process.
+8. **The health check never depends on a shared service.** If it checked Postgres or RabbitMQ,
+   one blip would mark *every* copy unhealthy at once and Traefik would have nowhere to send
+   traffic — a full outage instead of a few errors. The healthcheck calls `/health`, which only
+   asks "is this process up". (That's also why the API keeps serving when RabbitMQ is down,
    section 7.6.)
 
 ---
@@ -533,7 +590,7 @@ New variables in `backend/.env` (and `.env.example`):
 | Variable | Example | Used by |
 |---|---|---|
 | `RABBITMQ_URL` | `amqp://snap:snap@localhost:5672` | api, worker |
-| `INSTANCE_ID` | *(optional, defaults to hostname = the pod name in Kubernetes)* | api — names its realtime queue, plus a random suffix per start (see section 14) |
+| `INSTANCE_ID` | *(optional, defaults to the hostname = the container ID in Docker)* | api — names its realtime queue, plus a random suffix per start (see section 14) |
 | `SNAP_TTL_MS` | `86400000` (24 h) | api (`expires_at`) **and** topology (timer TTL) — one value, so they can't drift |
 | `SNAP_RETRY_DELAY_MS` | `30000` | worker, topology |
 | `SNAP_MAX_ATTEMPTS` | `3` | worker |
@@ -543,15 +600,13 @@ redeclare a queue with different arguments (`PRECONDITION_FAILED`). Stop the app
 `snap.expiry.wait` / `snap.retry.wait` in the web UI, restart. Timers that were waiting are lost;
 the safety net covers them.
 
-**In Kubernetes** the same variables arrive from two places:
+**In containers** the same variables arrive like this:
 
-| Where | Holds | Committed? |
+| Where | How | Committed? |
 |---|---|---|
-| ConfigMap `snap-config` | `SNAP_TTL_MS`, `SNAP_RETRY_DELAY_MS`, `SNAP_MAX_ATTEMPTS`, `S3_BUCKET`, `S3_REGION` | Yes — nothing secret |
-| Secret `snap-secrets` | `DATABASE_URL`, `RABBITMQ_URL`, `JWT_SECRET_KEY`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | **Never** — created with `kubectl create secret` from a gitignored file |
-
-Inside the cluster `DATABASE_URL` and `RABBITMQ_URL` point at the Service names (`postgres`,
-`rabbitmq`) instead of `localhost` — Kubernetes' own DNS resolves them.
+| Laptop (Step 7) | `env_file: backend/.env`; `compose.stack.yml` sets `DATABASE_URL` and `RABBITMQ_URL` to the service names (`postgres`, `rabbitmq`) instead of `localhost` | `.env`: **never** |
+| CI (Step 9) | Throwaway values in `compose.ci.yml` and an S3 stand-in — no real keys | Yes — nothing real in them |
+| Server (Step 11) | A `.env` file on the VPS, mode 600 | **Never** |
 
 ### S3 credentials
 
@@ -581,7 +636,7 @@ EC2/ECS. So on every machine — laptop, CI, production — the keys arrive as e
 5. **Old key:** deactivate the `fos25-snap` key (it was exposed in a session log on 2026-10-06),
    check nothing breaks, then delete it.
 
-Where the keys may live: `backend/.env` locally, the Kubernetes Secret in a cluster.
+Where the keys may live: `backend/.env` locally, the `.env` file on the server.
 Never in the app — every `EXPO_PUBLIC_*` value is bundled into the app and readable by anyone
 who has it.
 
@@ -594,26 +649,14 @@ README.md                          new — what it is, diagrams, how to run (fin
 .github/workflows/ci.yml           new — Step 9
 docs/architecture-decisions.md     new — Step 12
 docs/deployment.md                 new — Step 11
-docker-compose.yml                 + rabbitmq — everyday development only (Postgres + RabbitMQ)
+docker-compose.yml                 + rabbitmq — everyday development (Postgres + RabbitMQ); the base file
+compose.stack.yml                  new — the app in containers: traefik, migrate, api ×3, worker, sweep, e2e (Step 7)
+compose.ci.yml                     new — CI: S3 stand-in, throwaway passwords (Step 9)
+compose.prod.yml                   new — the server: ghcr.io images, HTTPS, no open database ports, limits (Step 11)
 infra/rabbitmq/enabled_plugins     new — management + shovel (for "Move messages")
-infra/kind-cluster.yaml            new — kind: 1 control plane + 2 workers, port 8080 → Gateway (Step 7)
-k8s/base/                          new — the app in Kubernetes, shared by every cluster (Step 7)
-  kustomization.yaml                 lists everything below
-  namespace.yaml                     namespace "snap"
-  config.yaml                        ConfigMap snap-config (nothing secret)
-  postgres.yaml                      StatefulSet + Service + volume
-  rabbitmq.yaml                      StatefulSet + Service + volume + enabled_plugins
-  migrate-job.yaml                   Job: run the migrations
-  api.yaml                           Deployment + Service + liveness/readiness probes
-  worker.yaml                        Deployment
-  sweep-cronjob.yaml                 CronJob: hourly safety-net sweep
-  gateway.yaml                       Gateway + HTTPRoute (Traefik)
-  hpa.yaml                           HorizontalPodAutoscaler for api (Step 8)
-  pdb.yaml                           PodDisruptionBudget for api (Step 8)
-k8s/overlays/local/                new — kind: local image, small limits (Step 7)
-k8s/overlays/cloud/                new — real cluster: ghcr.io image, TLS, bigger limits (Step 11)
-k8s/overlays/ci/                   new — CI's kind cluster: S3 stand-in, e2e as a Job (Step 9)
-backend/Dockerfile                 new — two targets: `app` and `migrate` (needs dbmate)
+infra/traefik/                     new — Traefik settings: entry points, timeouts (Step 7), Let's Encrypt (Step 11)
+infra/server/                      new — deploy script, cron lines for the sweep and backups (Step 11)
+backend/Dockerfile                 new — two targets: `app` and `tools` (dev dependencies: dbmate, socket.io-client)
 backend/.dockerignore              new — keeps .env and the Mac's node_modules out of the image
 backend/package-lock.json          deleted — leftover from npm; Bun uses bun.lock
 backend/.env.example               + RABBITMQ_URL, SNAP_TTL_MS, S3_ENDPOINT, …
@@ -632,13 +675,13 @@ backend/src/services.ts            changed — one snap.created per snap; delete
 backend/src/repository/index.ts    + getExpiredSnapById(id)
 backend/src/worker.ts              new — expiry consumer, retries, queue monitor
 backend/src/index.ts               changed — connect RabbitMQ + relay; drop in-process sweep; SIGTERM
-backend/src/jobs/snap-expiry.ts    becomes scripts/sweep.ts — one run, then exit (a CronJob in Kubernetes)
+backend/src/jobs/snap-expiry.ts    becomes scripts/sweep.ts — one run, then exit (cron runs it on the server)
 backend/scripts/sweep.ts           new — `bun run sweep`: the safety net, once
 backend/scripts/dead-letters.ts    new — list | replay | purge
 backend/scripts/e2e.ts             new — the end-to-end test (Step 0), two base URLs (Step 3)
 backend/scripts/seed-demo.ts       new — two demo users who are already friends (Step 10)
-backend/scripts/load-test.ts       new — load for the autoscaler (Step 8); delivery times, failover (Step 12)
-snap/.env                          EXPO_PUBLIC_API_URL → the Gateway (:8080 on kind) in Step 7
+backend/scripts/load-test.ts       new — messages/s, delivery time, 1 copy vs 3, failover (Step 12)
+snap/.env                          EXPO_PUBLIC_API_URL → Traefik (:8080 on the laptop) in Step 7
 ```
 
 Sketch of the two central pieces:
@@ -767,8 +810,9 @@ an exclusive queue, not even the web UI (400 "cannot obtain exclusive access").
 - [ ] `src/worker.ts` (`bun run worker`): declare topology, `prefetch(10)`, consume
       `snap.expire.queue` → `deleteExpiredSnap` → ack.
 - [ ] Move the sweep out of the API into `scripts/sweep.ts` (`bun run sweep`): one run, then
-      exit. On the laptop it's run by hand; in Kubernetes a CronJob runs it hourly (Step 7).
-      *Changed in version 3 — before, the worker ran it on an hourly timer.*
+      exit. On the laptop it's run by hand; on the server cron runs it hourly (Step 11).
+      *Changed in version 3 — before, the worker ran it on an hourly timer. Version 4: cron on
+      the server instead of a Kubernetes CronJob.*
 
 ✅ **Done when:** with `SNAP_TTL_MS=20000` (delete `snap.expiry.wait` first — see section 10), a
 sent snap is removed from Postgres and S3 about 20 s later **by the timer**, with the sweep not
@@ -790,183 +834,183 @@ involved (visible in the worker log).
 
 ### Step 6 — Docker image
 
-*Changed in version 3 — before, this step was "several servers behind nginx" with docker compose.
-nginx and the compose replicas are dropped: Kubernetes does both in Step 7.*
+*Version 3 dropped the compose replicas and nginx for Kubernetes; version 4 brings the
+replicas back in Step 7, with Traefik in front. The `migrate` target became `tools`.*
 
-- [ ] `backend/Dockerfile` (`oven/bun:1.3-slim`, `bun install --frozen-lockfile --production`,
-      runs as the unprivileged `bun` user). Two targets:
-      - `app` — `CMD bun run src/index.ts`. The worker and the sweep use the same image with a
-        different command, so there is one image to build, scan and ship.
-      - `migrate` — includes dbmate (a dev dependency) and runs the migrations.
+- [ ] `backend/Dockerfile` (`oven/bun:1.3-slim`, runs as the unprivileged `bun` user). Two
+      targets:
+      - `app` — `bun install --frozen-lockfile --production`, `CMD bun run src/index.ts`. The
+        worker and the sweep use the same image with a different command, so there is one image
+        to build, scan and ship.
+      - `tools` — adds the dev dependencies: dbmate for the migrations, socket.io-client for the
+        e2e. Runs `bun run migrate` by default.
 
       Check that `bcrypt` (native module) installs on Linux.
 - [ ] `backend/.dockerignore`: `node_modules`, `.env`, `.env.*`. Without it the image would
       contain your S3 and JWT secrets, and the Mac build of `bcrypt` would replace the Linux one.
 - [ ] Delete `backend/package-lock.json` — one lockfile, `bun.lock`.
 - [ ] API shuts down gracefully on `SIGTERM`: stop taking requests, close the sockets (the
-      phones reconnect to another pod), stop the relay, close RabbitMQ. Kubernetes sends
-      `SIGTERM` on every deploy (section 9, rule 7).
+      phones reconnect to another copy), stop the relay, close RabbitMQ. `docker stop` and every
+      deploy send `SIGTERM` (section 9, rule 7).
 
 ✅ **Done when:** the image builds; a container from it (pointed at the laptop's Postgres and
 RabbitMQ) passes the e2e; `docker stop` shows a clean shutdown in the log within a few seconds,
 not a kill after the timeout.
 
-### Step 7 — Kubernetes on the laptop (kind)
+### Step 7 — Several copies on the laptop: docker compose + Traefik
 
-*New in version 3. Read section 4b first.*
+*New in version 4, in place of "Kubernetes on the laptop". Read section 4b first.*
 
-- [ ] Install `kind` and `kubectl` (Homebrew). `infra/kind-cluster.yaml`: 1 control plane +
-      2 workers, laptop port 8080 → the Gateway.
-- [ ] Gateway: install the Gateway API definitions and Traefik with its Gateway provider on.
-      `gateway.yaml` sends everything to Service `api`. Check two settings: the WebSocket idle
-      timeout (sockets stay open for hours) and the request-body limit (10 MB snaps).
-- [ ] `postgres.yaml`, `rabbitmq.yaml`: StatefulSets with a volume each, plus a Service each.
-      Readiness: `pg_isready` / `rabbitmq-diagnostics -q ping`.
-- [ ] `config.yaml` (ConfigMap) and the Secret, made from a gitignored file:
-      `kubectl create secret generic snap-secrets --from-env-file=k8s/overlays/local/secrets.env`
-      — `DATABASE_URL` and `RABBITMQ_URL` there use the Service names (section 10).
-- [ ] `migrate-job.yaml`: the `migrate` image. The api is applied after it has completed
-      (`kubectl wait --for=condition=complete job/migrate`).
-- [ ] `api.yaml`: Deployment, 3 replicas, settings from the ConfigMap + Secret, liveness and
-      readiness probes on `/health`, Service port 80 → 3000.
-- [ ] `worker.yaml` (1 replica) and `sweep-cronjob.yaml` (`0 * * * *`, `concurrencyPolicy:
-      Forbid` — never two sweeps at once).
-- [ ] Images into kind without a registry: `docker build` + `kind load docker-image`, with a
-      fixed tag (section 14).
+- [ ] `compose.stack.yml`, used together with `docker-compose.yml`
+      (`export COMPOSE_FILE=docker-compose.yml:compose.stack.yml`, then plain `docker compose`):
+  - `traefik`: Docker provider with `exposedByDefault=false` (only containers labelled
+    `traefik.enable=true` get traffic), laptop port 8080 → the api copies. Check two settings:
+    the WebSocket idle timeout (sockets stay open for hours) and the request-body limit (10 MB
+    snaps).
+  - `migrate`: the `tools` image, runs once; everything that needs the database starts after it
+    has finished (`depends_on: { migrate: { condition: service_completed_successfully } }`).
+  - `api`: the `app` image, `deploy.replicas: 3`, `env_file: backend/.env` with `DATABASE_URL`
+    and `RABBITMQ_URL` set to the service names (section 10), `restart: unless-stopped`, a
+    healthcheck on `/health` (the slim image may have no `curl` — check, or call `/health` with
+    `bun` itself), Traefik labels. No published port: only Traefik is reachable from outside.
+  - `worker`: the `app` image running `bun run worker`, 1 copy.
+  - `sweep` and `e2e` (profile `tools`): run on demand with `docker compose run --rm …`. The e2e
+    runs as a container so it can reach each copy by name: Anna and Cara on `snap-api-1`
+    (`E2E_BASE_URL`), Ben and Dave on `snap-api-2` (`E2E_OTHER_URL`).
+- [ ] `infra/traefik/`: the static settings (entry point, timeouts), mounted read-only.
 - [ ] App: `EXPO_PUBLIC_API_URL=http://<your-ip>:8080`.
 
 ✅ **Done when:**
-- From an empty cluster, `kubectl apply -k k8s/overlays/local` → every pod Running, `migrate`
-  Completed.
-- The e2e passes through the Gateway: `E2E_BASE_URL=http://localhost:8080`, with
-  `DATABASE_URL` pointing at `kubectl port-forward svc/postgres 5435:5432` — the test's setup
-  and cleanup must talk to the cluster's database, not the laptop's.
-- The RabbitMQ web UI (`kubectl port-forward svc/rabbitmq 15672`) shows three `realtime.*`
-  queues — one per api pod.
-- `kubectl delete pod <an api pod>` in the middle of a chat → the app reconnects, Kubernetes
-  starts a replacement, its new realtime queue appears and the old one disappears.
-- `kubectl create job --from=cronjob/sweep sweep-now` runs the sweep once, successfully.
+- From nothing, `docker compose up -d` → `docker compose ps` shows `migrate` exited 0, 3 api
+  copies healthy, the worker running.
+- The e2e passes through Traefik (`E2E_BASE_URL=http://localhost:8080`), and again as a
+  container with Anna on `snap-api-1` and Ben on `snap-api-2`, so every push must cross.
+- The RabbitMQ web UI shows three `realtime.*` queues — one per api copy.
+- `docker kill snap-api-2` in the middle of a chat on the phone → the app reconnects through
+  Traefik to another copy, and that copy's realtime queue disappears; `docker compose up -d`
+  brings the third copy back with a new queue.
+- `docker compose run --rm sweep` runs the sweep once, successfully.
 
-### Step 8 — Kubernetes like production
+### Step 8 — ~~Kubernetes like production~~ (dropped in version 4)
 
-*New in version 3.*
+Autoscaling, PodDisruptionBudgets and spreading copies over nodes need Kubernetes; Relay shows
+them. What is still useful without Kubernetes moved:
 
-- [ ] Resource requests and limits on every container. The autoscaler measures CPU as a
-      percentage of the request, so without one it can't work.
-- [ ] metrics-server (in kind it needs `--kubelet-insecure-tls`) and `hpa.yaml`: api between
-      2 and 6 pods, aiming at 70 % CPU.
-- [ ] Rolling updates: `maxUnavailable: 0`, `maxSurge: 1`, and a short `preStop` pause so the
-      Service stops sending a pod traffic *before* it shuts down.
-- [ ] `pdb.yaml`: PodDisruptionBudget, at least 1 api pod running during maintenance.
-- [ ] `topologySpreadConstraints`: api pods spread over both worker nodes — copies on different
-      "machines", even on the laptop.
-- [ ] `scripts/load-test.ts`, first version: many sockets sending messages, enough to load the
-      CPU. Step 12 adds the measurements.
-- [ ] Image tags are the commit SHA, never `latest`.
-
-✅ **Done when:**
-- The e2e runs in a loop while `kubectl rollout restart deployment/api` replaces every pod →
-  zero failed checks.
-- The load test pushes the autoscaler from 2 pods up, and it scales back down to 2 afterwards
-  (`kubectl get hpa -w`).
-- `kubectl drain` on one worker node → its api pods move to the other node, never fewer than 1
-  running, and the e2e still passes.
+| Was in Step 8 | Now |
+|---|---|
+| Image tags are the commit SHA, never `latest` | Step 9 |
+| Resource limits on every container | Step 11 (`compose.prod.yml`), so one copy can't starve the server |
+| No failed requests during a deploy | Step 11 (deploy script) |
+| Load test, first version | Step 12 |
 
 ### Step 9 — CI/CD on every push
 
-*Changed in version 3 — before, this was Step 7 and tested two API processes; now it deploys
-the Kubernetes files to a throwaway cluster and tests that.*
+*Changed in version 4 — the stack runs in docker compose in GitHub Actions instead of a kind
+cluster.*
 
 - [ ] `.github/workflows/ci.yml`, on every push and pull request:
   - **Typecheck** backend and app.
-  - **Build** both image targets.
-  - **A kind cluster** in GitHub Actions: load the images, `kubectl apply -k k8s/overlays/ci`,
-    wait for every rollout, then run the **e2e as a Job inside the cluster** with 3 api pods.
-  - **S3 stand-in** inside the cluster through `S3_ENDPOINT`, so CI never holds real AWS keys.
-    MinIO is archived (no images since October 2025) — use Adobe S3Mock or SeaweedFS.
-    Presigned links carry the stand-in's hostname, which only resolves inside the cluster —
-    that's why the e2e runs there too.
+  - **Build** both image targets, tagged with the commit SHA.
+  - **The whole stack** in compose: `docker-compose.yml` + `compose.stack.yml` +
+    `compose.ci.yml` → Postgres, RabbitMQ, an S3 stand-in, `migrate`, 3 api copies, the worker,
+    Traefik. Then the **e2e as a container on the compose network**, Anna on `snap-api-1` and
+    Ben on `snap-api-2`.
+  - **S3 stand-in** through `S3_ENDPOINT`, so CI never holds real AWS keys. MinIO is archived
+    (no images since October 2025) — use Adobe S3Mock or SeaweedFS. Presigned links carry the
+    stand-in's hostname, which only resolves on the compose network — that's why the e2e runs
+    there too.
   - **No secrets committed**: fail if a `.env` file is tracked or an AWS key (`AKIA…`) appears.
 - [ ] Security scans on every push, free for public repos: **CodeQL** reads the code for
       dangerous patterns; **Dependabot** warns about known holes in the npm packages and opens
       update pull requests.
-- [ ] On `main` only: push the `app` and `migrate` images to ghcr.io, tagged with the commit SHA.
+- [ ] On `main` only: push the `app` and `tools` images to ghcr.io, tagged with the commit SHA,
+      built for amd64 and arm64 (section 14).
 - [ ] CI badge at the top of the README.
 
-✅ **Done when:** main is green; a deliberately broken relay makes the in-cluster e2e fail; the
+✅ **Done when:** main is green; a deliberately broken relay makes the e2e in CI fail; the
 images appear under the repo's *Packages* on GitHub.
 
 ### Step 10 — Ready for the public internet
 
-*Unchanged in version 3 apart from its number (was Step 8).*
+*Unchanged in version 3 apart from its number (was Step 8); version 4 only changes "pod" to
+"copy".*
 
-- [ ] Rate-limit `/login` and `/register` (`@fastify/rate-limit`). Kept in each pod's memory —
-      so the real limit is *pods × configured limit*, and the autoscaler changes the number of
-      pods. Fine at this size; written down as such.
+- [ ] Rate-limit `/login` and `/register` (`@fastify/rate-limit`). Kept in each copy's memory —
+      so the real limit is *copies × configured limit* (3 × the limit). Fine at this size;
+      written down as such.
 - [ ] Refresh token: 10 years → 30 days. The app refreshes on its own, so only someone idle for
       a month logs in again.
-- [ ] Logs: Fastify's built-in logger (pino) with `instance` (the pod name) on every line, and
-      each event's `messageId` logged when published and when delivered — one chat message can
-      then be followed pod 1 → RabbitMQ → pod 2 with `kubectl logs`.
+- [ ] Logs: Fastify's built-in logger (pino) with `instance` (the copy's `INSTANCE_ID`) on every
+      line, and each event's `messageId` logged when published and when delivered — one chat
+      message can then be followed copy 1 → RabbitMQ → copy 2 with `docker compose logs`.
 - [ ] `GET /health/ready`: checks Postgres and RabbitMQ — for people and deploy checks, **not**
-      for the probes (section 9, rule 8).
+      for the healthcheck (section 9, rule 8).
 - [ ] Go through what CodeQL and Dependabot (Step 9) report, and scan the image; fix what they
       find.
 - [ ] `bun run seed:demo`: two demo users who are already friends, so a visitor can try chat in
       a minute.
 
-✅ **Done when:** the e2e passes, the 6th wrong login in a minute gets a 429, and the logs show
-one message's `messageId` on two different pods.
+✅ **Done when:** the e2e passes, the 6th wrong login in a minute against one copy gets a 429,
+and the logs show one message's `messageId` on two different copies.
 
-### Step 11 — Deploy to a real Kubernetes cluster
+### Step 11 — Deploy to one VPS with docker compose
 
-*Changed in version 3 — before, this was Step 9 and chose between a VPS with docker compose,
-Fly.io and Render. Now the target is a Kubernetes cluster; only the provider is still open.*
+*Changed in version 4 — before, a real Kubernetes cluster. Now one VPS running the same compose
+files as the laptop, plus `compose.prod.yml`.*
 
-What the cluster needs:
+What the server needs:
 
 | Need | Why |
 |---|---|
-| At least 2 worker nodes | Copies on different machines |
-| A public IP or load balancer for the Gateway | Traffic in |
-| Persistent volumes | Postgres and RabbitMQ data |
-| A domain or subdomain + cert-manager (Let's Encrypt) | Phones refuse plain HTTP outside development |
-| Postgres backups | A CronJob: `pg_dump` → S3 (its own prefix or bucket) |
+| One small Linux VPS with Docker | Runs everything; size it from the memory use seen in Step 7 |
+| A domain or subdomain pointing at it | Let's Encrypt needs a name; phones refuse plain HTTP outside development |
+| Firewall: only 22, 80 and 443 open | Postgres and RabbitMQ are never reachable from outside (the RabbitMQ web UI goes through an SSH tunnel) |
+| Volumes for Postgres and RabbitMQ | The data survives a container restart |
+| Postgres backups | Daily `pg_dump` → S3 (its own prefix or bucket), run by cron |
 
-| Option | Shape | Cost | Trade-off |
-|---|---|---|---|
-| k3s on 2–3 small VPSs | You install Kubernetes yourself; k3s ships with Traefik | Lowest | Most learning — you also run the control plane and its upgrades |
-| Managed, free control plane (e.g. DigitalOcean, Akamai/Linode, Civo) | The provider runs the control plane; you pay for the nodes | Low to medium | Real managed Kubernetes without big-cloud prices |
-| Big cloud (GKE, EKS, AKS) | Managed; the names on most job ads | Highest — EKS also charges for the control plane | Best on a CV; easiest to overspend — set a budget alert first |
+| Where | Trade-off |
+|---|---|
+| A new small VPS (any provider) | Clean: Snap can't disturb Relay, and Traefik gets ports 80 and 443 to itself |
+| The VPS that runs Relay | No extra cost, but Relay's k3s already holds ports 80 and 443 there, so Snap would have to go into k3s — Kubernetes again |
 
 Prices change; compare them when we get here.
 
-- [ ] Choose the provider, and whether Postgres stays in the cluster (with the backup CronJob)
-      or moves to a managed database.
-- [ ] `k8s/overlays/cloud`: images from ghcr.io, TLS, real resource sizes.
-- [ ] CD: on `main`, after CI passes, GitHub Actions applies the cloud overlay with the new
-      image tag — using a service account that can only touch the `snap` namespace.
+- [ ] Choose the VPS, and whether Postgres stays on it (with backups) or moves to a managed
+      database.
+- [ ] `compose.prod.yml`: images from ghcr.io by commit SHA, Traefik with Let's Encrypt and
+      80 → 443, no published database ports, resource limits per container,
+      `restart: unless-stopped`, settings from the `.env` file on the server (section 10).
+- [ ] Deploy without downtime, `infra/server/deploy.sh` (or a ready-made tool such as the
+      docker-rollout plugin — decide here): pull the new image, run `migrate`, start new api
+      copies next to the old ones, wait until they're healthy, then stop the old ones with
+      `SIGTERM` (Step 6). Migrations must work with the old code too (section 14).
+- [ ] CD: on `main`, after CI passes, GitHub Actions connects over SSH as a deploy user whose
+      key can only run the deploy, and passes the new image tag.
+- [ ] cron on the server: the sweep hourly (`docker compose run --rm sweep`), the backup daily.
 - [ ] `docs/deployment.md`. Point the app at the `https://` URL.
 
-✅ **Done when:** the e2e passes against the public URL; deleting an api pod there doesn't
-break a live chat; a deploy from CI causes no failed requests.
+✅ **Done when:** the e2e passes against the public URL; killing an api copy there doesn't break
+a live chat; the e2e in a loop during a deploy from CI has zero failed checks; last night's
+backup restores into an empty database.
 
 ### Step 12 — Proof and presentation
 
-*Was Step 10; version 3 adds the autoscaler and Kubernetes to what gets shown.*
+*Was Step 10; version 4 compares 1 copy with 3 instead of showing an autoscaler.*
 
-- [ ] `scripts/load-test.ts`, final version: many sockets spread over the pods; messages per
-      second and delivery time (p50 / p95); **pods over time** as the autoscaler reacts; a pod
-      deleted mid-test and how long until every client is back. The README gets the real
-      numbers, whatever they are.
-- [ ] A way to see it without the code: a short screen recording (two phones, `kubectl delete
-      pod`, the chat carries on, the autoscaler adding pods), plus a way to try it (Expo Go via
-      an EAS Update QR code, or an Android APK — check what SDK 54 supports at that point).
+- [ ] `scripts/load-test.ts`: many sockets spread over the copies; messages per second and
+      delivery time (p50 / p95) with 1 copy and with 3; a copy killed mid-test and how long until
+      every client is back. Bun runs the JavaScript on one core per process, so on a server with
+      several cores 3 copies should handle more — the test shows whether they do. The README gets
+      the real numbers, whatever they are.
+- [ ] A way to see it without the code: a short screen recording (two phones, `docker kill` on a
+      copy, the chat carries on), plus a way to try it (Expo Go via an EAS Update QR code, or an
+      Android APK — check what SDK 54 supports at that point).
 - [ ] Root `README.md`, final version: what it is, the diagrams, "follow one message across
-      pods", the numbers, how to run it.
-- [ ] `docs/architecture-decisions.md`: the decisions from section 1 with their trade-offs —
-      why RabbitMQ and not the Redis adapter, why push-only sockets, why no sticky sessions, why
-      the timer *and* the sweep, why Kubernetes for an app this size, why Gateway API.
+      copies", the numbers, how to run it.
+- [ ] `docs/architecture-decisions.md`: the decisions from section 1 with their trade-offs — why
+      RabbitMQ and not the Redis adapter, why push-only sockets, why no sticky sessions, why the
+      timer *and* the sweep, why docker compose and not Kubernetes for this project (version 4),
+      why Traefik.
 
 ✅ **Done when:** someone who has never seen the project understands it from the README in five
 minutes.
@@ -983,14 +1027,13 @@ minutes.
 | Broken S3 key in worker | Retries → dead-letter queue → replay | 5 |
 | Typo'd routing key | Alternate exchange catches it | 5 |
 | Stop RabbitMQ | API keeps serving; reconnects; safety net cleans up | 5 |
-| e2e through the Gateway on kind | The app works in Kubernetes | 7 |
-| Delete an api pod | The app reconnects to another; Kubernetes replaces the pod | 7 |
-| e2e in a loop during a rolling update | Deploys cause no downtime | 8 |
-| Load test | The autoscaler adds pods, then removes them | 8 |
-| Drain a node | Pods move; at least one stays up | 8 |
-| CI: kind cluster, 3 api pods, e2e inside it | Every push still crosses pods | 9 |
+| Stack in compose: e2e through Traefik, and across named copies | The app works as 3 containers behind a load balancer | 7 |
+| Kill an api copy mid-chat | The app reconnects to another; that copy's queue goes away | 7 |
+| CI: whole stack in compose, 3 api copies, e2e on its network | Every push still crosses copies | 9 |
 | e2e against the public URL | The deployment works | 11 |
-| Load test with a pod deleted mid-way | Real numbers for the README; failover time | 12 |
+| e2e in a loop during a deploy | Deploys cause no failed requests | 11 |
+| Restore last night's backup | Backups actually work | 11 |
+| Load test: 1 copy vs 3, a copy killed mid-way | Real numbers for the README; failover time | 12 |
 
 The e2e test creates throwaway users (`zzt_…`), uploads tiny PNGs to S3, and deletes both
 afterwards.
@@ -1006,40 +1049,44 @@ afterwards.
 - **TTL expires only at the head of a queue.** Fine for one fixed TTL; never mix different
   per-message TTLs in the same waiting room.
 - **`#` bindings disable the alternate exchange** for that exchange.
-- **The hostname alone is not unique enough.** A pod that restarts (or a Docker container) keeps
+- **The hostname alone is not unique enough.** A container that restarts keeps
   its hostname, so the new process can meet its own old exclusive queue, still held by a
   connection RabbitMQ hasn't noticed is dead, and fail with `RESOURCE_LOCKED`. Hence the random
   suffix on every realtime queue.
 - **Publishing before the relay queue is bound** sends real events to `snap.unrouted` and makes
   them look like typos. Bind first, then publish.
-- **RabbitMQ needs a StatefulSet, not a Deployment.** It stores its data under its own hostname;
-  a Deployment gives the pod a new name on every restart, and RabbitMQ wouldn't find its data.
-  The same in docker compose: without `hostname:`, every recreated container gets a random one.
+- **RabbitMQ needs a fixed hostname.** It stores its data under its own hostname; without
+  `hostname:` in compose every recreated container gets a random one, and RabbitMQ wouldn't find
+  its data. (In Kubernetes the same problem is why RabbitMQ runs as a StatefulSet.)
 - **`guest` only logs in from inside the container**, and doesn't exist at all once
   `RABBITMQ_DEFAULT_USER` is set — hence our own `snap` user.
 
-**Kubernetes**
-- **ingress-nginx is retired** (March 2026) — no more security fixes. Use Gateway API.
-- **The Gateway must keep WebSockets open and accept 10 MB bodies** — check the controller's
-  idle timeout and body limit (nginx's 1 MB default was the old version of this problem).
-- **kind can't pull an image that only exists on the laptop.** `kind load docker-image`, and a
-  fixed tag: with `:latest` Kubernetes always tries to pull → `ErrImagePull`. Docker Desktop's
-  own Kubernetes has no such command — its nodes don't see the laptop's images at all.
-- **The control-plane node takes no app pods** (it has a taint). "2 nodes" in kind or Docker
-  Desktop means 1 control plane + 1 worker — so every pod lands on the same machine. Spreading
-  and draining (Step 8) need 2 workers: 3 nodes.
-- **The Mac is arm64; GitHub's runners and most cloud nodes are amd64.** An image built on the
-  laptop won't run on an amd64 cluster. CI builds its own; images for ghcr.io are built for
-  both (`docker buildx --platform linux/amd64,linux/arm64`).
-- **Deleting a StatefulSet keeps its volumes.** On purpose — the data survives. To start from
-  scratch, delete the PersistentVolumeClaims too.
-- **The autoscaler needs CPU requests and metrics-server.** Without them `kubectl get hpa` shows
-  `<unknown>`. In kind, metrics-server needs `--kubelet-insecure-tls`.
-- **A Secret is base64, not encryption.** Anyone who can read the YAML can read the password —
-  never commit one.
-- **Readiness must not check Postgres or RabbitMQ** — see section 9, rule 8.
-- **Presigned links carry the S3 endpoint's hostname.** With an in-cluster S3 stand-in, whoever
-  downloads the photo must be inside the cluster — hence the e2e as a Job in CI.
+**docker compose and Traefik**
+- **Traefik must keep WebSockets open and accept 10 MB bodies** — check its idle timeout and
+  body limit (nginx's 1 MB default was the old version of this problem).
+- **Without a healthcheck Traefik routes to a copy as soon as it starts**, before it's ready.
+  With one, it waits until the copy is healthy, and stops when it isn't.
+- **Docker restarts a container whose process exits, never one that's only unhealthy.** A hung
+  copy just stops getting traffic. Kubernetes' liveness probe would restart it; here it's manual.
+- **Compose has no rolling update.** `docker compose up -d` with a new image recreates the
+  copies without waiting for new ones to be healthy — hence the deploy script in Step 11.
+- **Migrations run while old copies still serve** (Step 11), so each migration must work with the
+  old code too: add a column first, remove the old one a release later.
+- **Copies of one service can't publish the same host port.** Only Traefik publishes a port; the
+  copies are reached through it, or by container name from inside the compose network.
+- **Container names resolve inside the compose network, not on the laptop** — so a test that has
+  to pick a specific copy runs as a container.
+- **Traefik reads the Docker socket** to find the copies. `:ro` on the mount doesn't make that
+  safe — the Docker API can still do anything — so keep Traefik's dashboard off on the server
+  and pin its image version.
+- **`docker compose down -v` deletes the volumes** — the database and RabbitMQ's data. Never
+  `-v` on the server.
+- **The Mac is arm64; GitHub's runners and most VPSs are amd64.** An image built on the laptop
+  won't run on an amd64 server. CI builds its own; images for ghcr.io are built for both
+  (`docker buildx --platform linux/amd64,linux/arm64`).
+- **The health check must not check Postgres or RabbitMQ** — see section 9, rule 8.
+- **Presigned links carry the S3 endpoint's hostname.** With the S3 stand-in in CI, whoever
+  downloads the photo must be on the compose network — hence the e2e as a container in CI.
 
 **Everything else**
 - **Socket.io polling transport would need sticky sessions.** The app uses WebSocket only; keep it
@@ -1058,18 +1105,20 @@ afterwards.
 
 ## 15. Later (not in this plan)
 
+- **Kubernetes for Snap** (plan version 3 in the git history: kind, Gateway API, autoscaling,
+  PodDisruptionBudgets, a kind cluster in CI, then GitOps with Argo CD and a Helm chart). The
+  Docker image, health check and graceful shutdown from Steps 6–7 make it a move, not a
+  rewrite. Kubernetes is already shown in Relay.
 - Direct-to-S3 uploads with presigned PUT URLs (changes `POST /snaps`).
 - Expo push notifications for users with the app closed — a new consumer of `message.created`
   and `snap.created`.
-- RabbitMQ with three nodes and quorum queues, run by the RabbitMQ Cluster Operator (today
-  RabbitMQ is a single point of failure for pushes, not for data).
-- Routing pushes only to the pod a user is on, instead of every pod (matters with many pods).
-- GitOps with Argo CD: the cluster pulls its desired state from the repo instead of CI pushing it.
-- Prometheus + Grafana: queue depth, publish failures, pods over time — Step 10 only adds logs.
-- Secrets from a vault (External Secrets or Sealed Secrets) instead of `kubectl create secret`.
-- A Helm chart for the whole app, once the plain YAML is understood.
-- PgBouncer if the number of pods grows.
-- Rate limits shared across pods (in Postgres or Redis) instead of per pod.
+- RabbitMQ with three nodes and quorum queues (today RabbitMQ is a single point of failure for
+  pushes, not for data).
+- Routing pushes only to the copy a user is on, instead of every copy (matters with many copies).
+- Prometheus + Grafana: queue depth, publish failures, copies over time — Step 10 only adds logs.
+- Secrets from a vault instead of a `.env` file on the server.
+- PgBouncer if the number of copies grows.
+- Rate limits shared across copies (in Postgres or Redis) instead of per copy.
 
 ---
 
@@ -1086,21 +1135,20 @@ bun run sweep                                # the safety net, once
 bun run e2e                                  # end-to-end test
 bun run dead-letters list|replay|purge       # dead-letter queue
 
-# Kubernetes on the laptop (from Step 7)
-kind create cluster --name snap --config infra/kind-cluster.yaml
-kind load docker-image snap-api:<tag> --name snap
-kubectl apply -k k8s/overlays/local          # everything
-kubectl -n snap get pods -o wide             # what runs where
-kubectl -n snap logs deploy/api -f           # logs from one api pod
-kubectl -n snap delete pod <api pod>         # fail one copy on purpose
-kubectl -n snap rollout restart deployment/api
-kubectl -n snap get hpa -w                   # watch the autoscaler (Step 8)
-kubectl -n snap port-forward svc/rabbitmq 15672   # RabbitMQ web UI
-kind delete cluster --name snap              # throw it all away
+# The whole stack in containers (from Step 7)
+export COMPOSE_FILE=docker-compose.yml:compose.stack.yml
+docker compose up -d --build                 # Traefik, migrate, 3 api copies, worker
+docker compose ps                            # what runs, healthy or not
+docker compose logs -f api                   # logs from every api copy
+docker kill snap-api-2                       # fail one copy on purpose
+docker compose up -d                         # bring it back
+docker compose run --rm sweep                # the safety net, once
+docker compose run --rm e2e                  # e2e across named copies
+docker compose down                          # stop it all (keeps the data; never -v)
 
 bun run seed:demo                            # demo users (Step 10)
-bun run load-test                            # load (Step 8), numbers (Step 12)
+bun run load-test                            # numbers (Step 12)
 ```
 
 - RabbitMQ web UI: http://localhost:15672 (`snap` / `snap`)
-- API through the Gateway on kind: http://localhost:8080
+- API through Traefik: http://localhost:8080
