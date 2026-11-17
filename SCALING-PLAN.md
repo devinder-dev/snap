@@ -1,10 +1,11 @@
 # Snap — scaling plan: several servers and RabbitMQ
 
-Status: **Step 3 done** (2026-11-17), **plan version 4** (2026-11-17). The app runs on its own
+Status: **Step 4 done** (2026-11-17), **plan version 4** (2026-11-17). The app runs on its own
 S3 bucket, with a committed end-to-end test, and several copies of the backend can now run side
 by side: every live push goes through RabbitMQ, and each copy's relay delivers it to the phones
-connected there. Nothing reads the snap timer yet (that's Step 4). Steps 4–12 are not started
-(Step 8 was dropped). Version 4 runs the copies with **docker compose behind Traefik** instead
+connected there. A worker deletes each snap when its 24-hour timer runs out, and `bun run sweep`
+is the safety net; a failed delete is parked in `snap.dead.queue` (retries come in Step 5).
+Steps 5–12 are not started (Step 8 was dropped). Version 4 runs the copies with **docker compose behind Traefik** instead
 of Kubernetes — section 0 says what changed and why.
 Verified beforehand: `amqplib` 2.2 works under Bun 1.3.14, and every RabbitMQ feature used
 below (topic routing, alternate exchange, TTL → dead-letter timer, nack → dead-letter queue)
@@ -181,7 +182,7 @@ Kubernetes is shown in another project (Relay). Here the point is the realtime s
 | 1 | RabbitMQ running | ✅ 2026-10-21 |
 | 2 | Queue module | ✅ 2026-11-17 |
 | 3 | Live pushes across servers | ✅ 2026-11-17 |
-| 4 | Worker + snap timer | ⬜ |
+| 4 | Worker + snap timer | ✅ 2026-11-17 |
 | 5 | Retries, dead letters, alternate exchange | ⬜ |
 | 6 | Docker image | ⬜ |
 | 7 | Several copies on the laptop: docker compose + Traefik | ⬜ |
@@ -805,18 +806,34 @@ an exclusive queue, not even the web UI (400 "cannot obtain exclusive access").
 
 ### Step 4 — Worker + snap timer
 
-- [ ] `repository.getExpiredSnapById(id)` and `services.deleteExpiredSnap(id)`: only if
+- [x] `repository.getExpiredSnapById(id)` and `services.deleteExpiredSnap(id)`: only if
       `expires_at <= now()`; S3 object first, then the row.
-- [ ] `src/worker.ts` (`bun run worker`): declare topology, `prefetch(10)`, consume
+- [x] `src/worker.ts` (`bun run worker`): declare topology, `prefetch(10)`, consume
       `snap.expire.queue` → `deleteExpiredSnap` → ack.
-- [ ] Move the sweep out of the API into `scripts/sweep.ts` (`bun run sweep`): one run, then
+- [x] Move the sweep out of the API into `scripts/sweep.ts` (`bun run sweep`): one run, then
       exit. On the laptop it's run by hand; on the server cron runs it hourly (Step 11).
       *Changed in version 3 — before, the worker ran it on an hourly timer. Version 4: cron on
       the server instead of a Kubernetes CronJob.*
 
 ✅ **Done when:** with `SNAP_TTL_MS=20000` (delete `snap.expiry.wait` first — see section 10), a
 sent snap is removed from Postgres and S3 about 20 s later **by the timer**, with the sweep not
-involved (visible in the worker log).
+involved (visible in the worker log). **Afterwards** stop the API and worker and delete
+`snap.expiry.wait` again, so the next normal start creates the 24 h queue; otherwise that start
+hits the 406 and exits (Step 2).
+
+**Result (2026-11-17):** the worker reuses Step 3's `onConnect` hook
+(`connectQueue('snap-worker', startWorker)`): its own channel, `prefetch(10)`, and each job
+re-checks `expires_at` in Postgres, deletes the S3 object then the row, and acks. A failed job
+is nacked without requeue, so it lands in `snap.dead.queue` (Step 5 adds the retries first); a
+message without a usable `snap_id` goes there at once. `jobs/snap-expiry.ts` is gone from the
+API; `scripts/sweep.ts` runs the same sweep once and exits non-zero on failure. Tested with
+`SNAP_TTL_MS=20000`: a photo snap was deleted from Postgres and S3 **20.2 s** after sending,
+by the worker. A timer for a snap that no longer exists → acked, "nothing to do". A message
+without `snap_id` → `snap.dead.queue` (`x-death` reason `rejected`). A worker with a wrong S3
+secret → `SignatureDoesNotMatch`, dead-lettered, row kept; `bun run sweep` then deleted it
+(exit 0). Restored to 24 h, then `bun run e2e` 67 of 67 with no sweep in the API log;
+`snap.dead.queue` and `snap.unrouted.queue` back to 0. A deleted photo answers **403**, not
+404: the IAM user has no `s3:ListBucket`, so S3 won't say whether a key exists.
 
 ### Step 5 — Retries, dead letters, alternate exchange
 

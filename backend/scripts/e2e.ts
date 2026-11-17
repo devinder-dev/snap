@@ -353,7 +353,7 @@ try {
         check('one snap to ben and cara (201)', group.status === 201, group)
         check('both are pushed the same snap', toBen?.snap_id === group.body?.snap_id && toCara?.snap_id === group.body?.snap_id, { toBen, toCara })
 
-        section('Expiry (the function the 5-minute sweep runs)')
+        section('Expiry (the function `bun run sweep` runs)')
 
         const groupId: string = group.body?.snap_id
         const [media] = await sql`SELECT media_key FROM snaps WHERE id = ${groupId}`

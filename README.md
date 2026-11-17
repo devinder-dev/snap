@@ -106,8 +106,8 @@ sequenceDiagram
     end
 ```
 
-An hourly sweep in the worker deletes anything the timer missed, so a lost or dead-lettered
-job never leaves a photo behind.
+An hourly sweep (`bun run sweep`, run by cron on the server) deletes anything the timer missed,
+so a lost or dead-lettered job never leaves a photo behind.
 
 ## Repository
 

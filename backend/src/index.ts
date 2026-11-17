@@ -4,7 +4,6 @@ import routes from "./http/routes";
 import fastifyMultipart from "@fastify/multipart";
 import addGlobalErrorHandler from "./utils/errorHandler";
 import websocket from "./websocket";
-import snapExpiry from "./jobs/snap-expiry";
 import { closeQueue, connectQueue } from "./queue/connection";
 import { startRelay } from "./websocket/relay";
 
@@ -28,7 +27,9 @@ await httpServer.register(fastifyMultipart, {
 await httpServer.register(auth);
 await httpServer.register(routes);
 await httpServer.register(websocket)
-await httpServer.register(snapExpiry)
+
+// No expiry job in here any more: the worker deletes each snap when its timer
+// runs out (`bun run worker`), and `bun run sweep` is the safety net.
 
 // RabbitMQ. This returns at once, even while RabbitMQ is down: amqplib keeps
 // connecting in the background, and the HTTP API works without it. On every

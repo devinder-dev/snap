@@ -5,6 +5,8 @@
   "private": true,
   "scripts": {
     "dev": "bun run --sql-preconnect src/index.ts",
+    "worker": "bun run --sql-preconnect src/worker.ts",
+    "sweep": "bun scripts/sweep.ts",
     "migrate": "bun scripts/migrate.ts",
     "e2e": "bun scripts/e2e.ts"
   },

@@ -244,8 +244,24 @@ export async function reportScreenshot(username: string, snapId: string): Promis
 }
 
 
-// Snaps are deleted a batch at a time so one run can't hold a huge list in
-// memory or hammer S3 with thousands of parallel deletes.
+// One snap whose timer ran out (the worker, SCALING-PLAN.md 7.2). Same order as
+// the sweep below: the S3 object first, then the row.
+//
+// Returns false when there was nothing to do: the snap is already gone (the
+// sweep got there first, or this message is a redelivery) or, re-checked in
+// Postgres, not expired yet. Both are fine, so running this twice is safe.
+export async function deleteExpiredSnap(snapId: string): Promise<boolean> {
+    const snap = await repository.getExpiredSnapById(snapId)
+    if (!snap) return false
+
+    if (snap.media_key) await s3.deleteFile(snap.media_key)
+    await repository.deleteSnaps([snap.id])
+    return true
+}
+
+// The safety net (`bun run sweep`): every snap past expires_at, whatever
+// happened to its timer. Snaps are deleted a batch at a time so one run can't
+// hold a huge list in memory or hammer S3 with thousands of parallel deletes.
 const EXPIRY_BATCH_SIZE = 100
 
 // Delete every snap past expires_at: its S3 object first, then its row.

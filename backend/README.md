@@ -72,22 +72,34 @@ server.
 
 ## Snap expiry
 
-Snaps live 24 hours. Reads already refuse expired snaps; `src/jobs/snap-expiry.ts`
-sweeps every 5 minutes and deletes them for good — the S3 object first, then the
-row, so a failed S3 delete leaves the row to retry rather than orphaning the photo.
+Snaps live 24 hours. Reads already refuse expired snaps; two things delete them for
+good — the S3 object first, then the row, so a failed S3 delete leaves the row to
+retry rather than orphaning the photo:
 
-Every instance runs the sweep. That's safe (deletes are idempotent) but redundant
-once there are several instances.
+- **The timer.** Every `snap.created` also waits 24 hours in `snap.expiry.wait`;
+  RabbitMQ then hands it to the worker (`bun run worker`, `src/worker.ts`), which
+  re-checks `expires_at` in Postgres and deletes that one snap.
+- **The sweep** (`bun run sweep`, `scripts/sweep.ts`): one pass over everything past
+  `expires_at`, then exit. The safety net for timers that never ran (RabbitMQ was
+  down) or failed; on the server cron runs it hourly.
+
+```bash
+bun run worker              # a third terminal, next to dev
+bun run sweep               # now and then, by hand
+```
 
 ## Layout
 
 ```
 src/index.ts          server setup, plugin registration
+src/worker.ts         `bun run worker`: deletes each snap when its timer runs out
+src/config.ts         settings read once at startup (RabbitMQ, snap timing)
 src/auth.ts           JWT plugin + `authenticate` preHandler
 src/http/             routes, controllers (parse + validate), API types
 src/services.ts       business rules
 src/repository/       SQL (Bun.sql) and row types
-src/websocket/        socket.io server, handshake auth, emitters
-src/jobs/             background work (snap expiry)
+src/queue/            RabbitMQ: connection, topology, events, publish
+src/websocket/        socket.io server, handshake auth, publish + emit, relay
+scripts/              migrate, e2e, sweep
 db/migrations/        dbmate migrations
 ```

@@ -326,6 +326,19 @@ export async function getExpiredSnaps(limit: number): Promise<ExpiredSnap[]> {
     return rows as ExpiredSnap[]
 }
 
+// One snap, but only if it's past expires_at: what the worker checks before
+// deleting anything, so it never trusts the timer alone (SCALING-PLAN.md
+// section 9, rule 6). Null when the snap isn't due yet or is already gone.
+export async function getExpiredSnapById(id: string): Promise<ExpiredSnap | null> {
+    const [row] = await sql`
+        SELECT id, media_key
+        FROM snaps
+        WHERE id = ${id}
+          AND expires_at <= now()
+    `
+    return (row as ExpiredSnap | undefined) ?? null
+}
+
 // Delete snaps by id. snap_recipients rows go with them (ON DELETE CASCADE).
 // Re-checks expires_at so a batch that raced something can only ever delete
 // what is actually expired. Returns how many rows went.
