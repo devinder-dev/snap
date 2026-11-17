@@ -1,8 +1,9 @@
 # Snap — scaling plan: several servers, RabbitMQ and Kubernetes
 
-Status: **Step 1 done** (2026-10-21). The app is finished and runs on one server, on its own
-S3 bucket, with a committed end-to-end test; RabbitMQ runs next to Postgres but the app doesn't
-use it yet. Steps 2–12 are not started. On 2026-10-07 the plan
+Status: **Step 2 done** (2026-11-17). The app is finished and runs on one server, on its own
+S3 bucket, with a committed end-to-end test. The backend connects to RabbitMQ and declares every
+exchange and queue from section 5, but doesn't publish events yet (that's Step 3). Steps 3–12
+are not started. On 2026-10-07 the plan
 changed to run on **Kubernetes** — section 0 says what was planned before, what changes, and why.
 Verified beforehand: `amqplib` 2.2 works under Bun 1.3.14, and every RabbitMQ feature used
 below (topic routing, alternate exchange, TTL → dead-letter timer, nack → dead-letter queue)
@@ -125,7 +126,7 @@ and documented well enough that someone who has never seen it understands it in 
 | – | App on one server: auth, friends, snaps, chat, live pushes | ✅ 2026-09-30 |
 | 0 | Public repo, own S3 account, end-to-end test back | ✅ 2026-10-17 |
 | 1 | RabbitMQ running | ✅ 2026-10-21 |
-| 2 | Queue module | ⬜ |
+| 2 | Queue module | ✅ 2026-11-17 |
 | 3 | Live pushes across servers | ⬜ |
 | 4 | Worker + snap timer | ⬜ |
 | 5 | Retries, dead letters, alternate exchange | ⬜ |
@@ -705,21 +706,31 @@ confirm channel, got the confirm, read the message back and closed cleanly. `bun
 
 ### Step 2 — Queue module
 
-- [ ] `src/config.ts`: read `RABBITMQ_URL`, `SNAP_TTL_MS`, `SNAP_RETRY_DELAY_MS`, `SNAP_MAX_ATTEMPTS`.
+- [x] `src/config.ts`: read `RABBITMQ_URL`, `SNAP_TTL_MS`, `SNAP_RETRY_DELAY_MS`, `SNAP_MAX_ATTEMPTS`.
       `services.ts` uses `SNAP_TTL_MS` from here instead of its own constant.
-- [ ] `src/queue/connection.ts`: connect with backoff (1 s → 30 s), confirm channel, emit
+- [x] `src/queue/connection.ts`: connect with backoff (1 s → 30 s), confirm channel, emit
       `ready` on (re)connect — only after the topology is declared — close cleanly on shutdown.
       Decide first: `amqplib` has had built-in reconnects since v1.1
       (`connect(url, { recovery })`: backoff, jitter, max delay, a `setup` hook per connection) —
       use those, or write our own?
-- [ ] `src/queue/topology.ts`: all names as constants; `declareTopology(channel)` asserts every
+- [x] `src/queue/topology.ts`: all names as constants; `declareTopology(channel)` asserts every
       exchange, queue and binding from section 5.
-- [ ] `src/queue/events.ts` + `publish.ts`: routing keys, payload types, `publishEvent`.
-- [ ] `src/index.ts`: connect at startup — **the HTTP server starts even if RabbitMQ is down**.
+- [x] `src/queue/events.ts` + `publish.ts`: routing keys, payload types, `publishEvent`.
+- [x] `src/index.ts`: connect at startup — **the HTTP server starts even if RabbitMQ is down**.
 
 ✅ **Done when:** `bun run dev` → the web UI lists `snap.events`, `snap.unrouted`,
 `snap.expire`, `snap.dlx` and the durable queues; stopping RabbitMQ doesn't crash the API, and
 it reconnects when RabbitMQ is back.
+
+**Result (2026-11-17):** amqplib's built-in recovery, not our own loop: 1 s → 30 s with jitter,
+and its `setup` hook opens a confirm channel and declares the topology on every (re)connect.
+Instead of a separate `ready` event, the publish channel is only handed out after the topology
+is declared; until then `publishEvent` logs and drops. `onConnectFailed` retries network errors
+and exits on setup mistakes (wrong password, 406), the way a missing `S3_*` variable stops the
+server. Tested against RabbitMQ 4: the web UI shows 4 exchanges, 5 queues, 4 bindings and the
+connection `snap-api@<hostname>`. RabbitMQ stopped → `/health` stays 200, retries after 1.2 s,
+2.2 s, 4.1 s and 8.5 s, then reconnects and declares everything again. Wrong password → exit 1
+at boot. `SNAP_TTL_MS=20000` against the existing 24 h queue → 406, exit 1. `bun run e2e`: 67 of 67.
 
 ### Step 3 — Live pushes across servers
 

@@ -1,3 +1,4 @@
+import { config } from './config'
 import { AlreadyExists, BadRequest, NotFound, Unauthorized } from './errors'
 import type { AddFriendResponse, ApiConversation, ApiFriend, ApiFriendRequest, ApiMessage, ApiSnap, ApiSnapSummary, ApiUser, AuthRequest, SendSnapResponse } from './http/types'
 import type { MessageWithUsers } from './repository/types'
@@ -116,9 +117,6 @@ type Snap = {
     created_at: string
 }
 
-
-const SNAP_TTL_MS = 24 * 60 * 60 * 1000 // 24 timmar
-
 // The arguments to sendSnap, mirroring CreateSnapInput in repository/types.ts.
 // The union is the point: "a photo carries an image, a text snap carries a body"
 // becomes a compile-time fact instead of a runtime BadRequest.
@@ -143,7 +141,8 @@ export async function sendSnap(input: SendSnapInput): Promise<SendSnapResponse> 
     }
 
     // Först spara i databasen
-    const expiresAt = new Date(Date.now() + SNAP_TTL_MS)
+    // Same value as the timer queue's TTL (queue/topology.ts), so they can't drift.
+    const expiresAt = new Date(Date.now() + config.snapTtlMs)
 
     const base = {
         senderUsername,

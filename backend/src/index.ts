@@ -5,6 +5,7 @@ import fastifyMultipart from "@fastify/multipart";
 import addGlobalErrorHandler from "./utils/errorHandler";
 import websocket from "./websocket";
 import snapExpiry from "./jobs/snap-expiry";
+import { closeQueue, connectQueue } from "./queue/connection";
 
 const httpServer = fastify()
 
@@ -27,6 +28,11 @@ await httpServer.register(auth);
 await httpServer.register(routes);
 await httpServer.register(websocket)
 await httpServer.register(snapExpiry)
+
+// RabbitMQ. This returns at once, even while RabbitMQ is down: amqplib keeps
+// connecting in the background, and the HTTP API works without it.
+await connectQueue('snap-api')
+httpServer.addHook('onClose', closeQueue)
 
 const port = Number(process.env.PORT ?? 3000);
 
