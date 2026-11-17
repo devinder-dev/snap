@@ -88,6 +88,18 @@ bun run worker              # a third terminal, next to dev
 bun run sweep               # now and then, by hand
 ```
 
+A delete that fails (S3 down, say) is tried again 30 seconds later, up to
+`SNAP_MAX_ATTEMPTS` (3) times. After that the job is parked in `snap.dead.queue`
+with a `DEAD-LETTERED` log line, and the worker warns every minute that the queue
+grew — the same for `snap.unrouted.queue`, where an event with a typo'd routing
+key ends up. Parked jobs wait for a human:
+
+```bash
+bun run dead-letters list   # what's parked and why; it stays parked
+bun run dead-letters replay # once the cause is fixed: back to the worker, attempt 1
+bun run dead-letters purge  # delete them for good
+```
+
 ## Layout
 
 ```

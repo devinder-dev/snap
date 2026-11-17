@@ -1,12 +1,14 @@
 # Snap — scaling plan: several servers and RabbitMQ
 
-Status: **Step 4 done** (2026-11-17), **plan version 4** (2026-11-17). The app runs on its own
+Status: **Step 5 done** (2026-11-17), **plan version 4** (2026-11-17). The app runs on its own
 S3 bucket, with a committed end-to-end test, and several copies of the backend can now run side
 by side: every live push goes through RabbitMQ, and each copy's relay delivers it to the phones
-connected there. A worker deletes each snap when its 24-hour timer runs out, and `bun run sweep`
-is the safety net; a failed delete is parked in `snap.dead.queue` (retries come in Step 5).
-Steps 5–12 are not started (Step 8 was dropped). Version 4 runs the copies with **docker compose behind Traefik** instead
-of Kubernetes — section 0 says what changed and why.
+connected there. A worker deletes each snap when its 24-hour timer runs out, tries a failed
+delete 3 times 30 s apart, then parks it in `snap.dead.queue` and warns; `bun run dead-letters`
+replays or purges, and `bun run sweep` is the safety net. All the RabbitMQ code is done; Steps
+6–12 (containers, CI, deploy, proof) are not started (Step 8 was dropped). Version 4 runs the
+copies with **docker compose behind Traefik** instead of Kubernetes — section 0 says what
+changed and why.
 Verified beforehand: `amqplib` 2.2 works under Bun 1.3.14, and every RabbitMQ feature used
 below (topic routing, alternate exchange, TTL → dead-letter timer, nack → dead-letter queue)
 was tested against RabbitMQ 4.
@@ -183,7 +185,7 @@ Kubernetes is shown in another project (Relay). Here the point is the realtime s
 | 2 | Queue module | ✅ 2026-11-17 |
 | 3 | Live pushes across servers | ✅ 2026-11-17 |
 | 4 | Worker + snap timer | ✅ 2026-11-17 |
-| 5 | Retries, dead letters, alternate exchange | ⬜ |
+| 5 | Retries, dead letters, alternate exchange | ✅ 2026-11-17 |
 | 6 | Docker image | ⬜ |
 | 7 | Several copies on the laptop: docker compose + Traefik | ⬜ |
 | 8 | ~~Kubernetes like production~~ | Dropped in version 4 |
@@ -670,6 +672,7 @@ backend/src/queue/connection.ts    new — connect, retry, reconnect, confirm ch
 backend/src/queue/topology.ts      new — every name + declare everything (idempotent)
 backend/src/queue/publish.ts       new — publishEvent(routingKey, payload)
 backend/src/queue/events.ts        new — routing keys + payload types
+backend/src/queue/attempts.ts      new — the x-attempt header: read it, copy a job as attempt n (Step 5)
 backend/src/websocket/controllers.ts   changed — publish events instead of emitting
 backend/src/websocket/relay.ts     new — consume realtime.<id>, emit to local sockets
 backend/src/services.ts            changed — one snap.created per snap; deleteExpiredSnap(id)
@@ -837,17 +840,33 @@ secret → `SignatureDoesNotMatch`, dead-lettered, row kept; `bun run sweep` the
 
 ### Step 5 — Retries, dead letters, alternate exchange
 
-- [ ] Worker: on failure, if `x-attempt < SNAP_MAX_ATTEMPTS` → publish to `snap.retry.wait`
+- [x] Worker: on failure, if `x-attempt < SNAP_MAX_ATTEMPTS` → publish to `snap.retry.wait`
       with `x-attempt + 1`, wait for confirm, ack; else `nack(requeue=false)` + `DEAD-LETTERED` log.
       Invalid messages go straight to `nack(requeue=false)`.
-- [ ] Worker: every 60 s check the size of `snap.dead.queue` and `snap.unrouted.queue`, log a
+- [x] Worker: every 60 s check the size of `snap.dead.queue` and `snap.unrouted.queue`, log a
       warning when it grows.
-- [ ] `scripts/dead-letters.ts`: `list`, `replay` (to `snap.expire`, attempt reset), `purge`.
+- [x] `scripts/dead-letters.ts`: `list`, `replay` (to `snap.expire`, attempt reset), `purge`.
 
 ✅ **Done when:**
 - With a wrong `S3_SECRET_ACCESS_KEY` in the worker only, a job is tried 3 times (30 s apart)
   and lands in `snap.dead.queue`; after fixing the key, `bun run dead-letters replay` deletes it.
 - Publishing `mesage.created` (typo) lands in `snap.unrouted.queue` and the worker warns about it.
+
+**Result (2026-11-17):** `queue/attempts.ts` holds the `x-attempt` header (checked first against
+RabbitMQ 4: our own header survives the TTL → dead-letter trip, next to RabbitMQ's `x-death`).
+`connectQueue`'s `onConnect` now also gets the publish channel, which the worker uses for the
+retry copies; a copy RabbitMQ doesn't confirm parks the original instead of acking it. The
+60 s check uses AMQP's passive `checkQueue` on the worker's own connection, not the web API.
+Tested with `SNAP_TTL_MS=20000`: wrong S3 secret, attempt 1 failed, key fixed → attempt 2
+deleted the snap 30 s later with no human involved. Key left wrong → attempts at
+14:36:23, 14:36:54, 14:37:24, then `DEAD-LETTERED snap_id=16 after 3 attempts: …signature…`
+and, within the minute, `⚠️ snap.dead.queue has 1 message(s) (+1)`; `dead-letters list`
+showed it (attempts 3, rejected, from `snap.expire.queue`); key fixed → `replay` → deleted at
+once. `mesage.created` → `snap.unrouted.queue`, warned within 60 s. `purge` emptied the queue.
+Restored to 24 h, e2e 67 of 67, all four queues at 0. **Bug found and fixed:** the first
+`replay` left the parked copy in place as well — the script closed the connection right after
+the last ack, and the close overtook it. Closing the channel first (it waits for RabbitMQ's
+answer) fixed it; retested with 1 and with 3 parked jobs (section 14).
 
 ### Step 6 — Docker image
 
@@ -1117,6 +1136,14 @@ afterwards.
 - **A health check that queries the database**, called every few seconds, keeps a free cloud
   database awake until its monthly quota runs out (Fakturly, 2026-09-23). `/health` must not
   touch Postgres.
+- **A script that acks and then closes the connection can lose its last ack** (amqplib 2.2,
+  Step 5). The connection's close can overtake the ack, and RabbitMQ puts the message back.
+  Close the channel first — `await channel.close()` waits for RabbitMQ's answer, and a
+  channel's frames are handled in order — then the connection.
+- **An exclusive queue can only be deleted by its own connection** — the web UI gets a 400
+  (Step 3). To reset a copy's realtime queue, force-close its connection instead.
+- **A deleted S3 object answers 403, not 404**, because the IAM user has no `s3:ListBucket`
+  (Step 4). Tests check "not 200".
 
 ---
 

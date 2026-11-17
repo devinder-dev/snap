@@ -14,8 +14,10 @@ import { declareTopology } from './topology'
 // consumers again: the API's relay, and from Step 4 the worker.
 
 // Starts a process's consumers on a fresh connection. Runs on every
-// (re)connect, after the topology exists and before publishing opens.
-export type OnConnect = (model: ChannelModel) => Promise<void>
+// (re)connect, after the topology exists and before publishing opens. It gets
+// the new connection's publish channel too, for consumers that publish as part
+// of their work (the worker sends failed jobs to snap.retry.wait).
+export type OnConnect = (model: ChannelModel, publish: ConfirmChannel) => Promise<void>
 
 // The kinds of error amqplib hands us. `code` is a string for network errors
 // ('ECONNREFUSED', with an empty message) and a number for an AMQP refusal
@@ -59,7 +61,7 @@ export async function connectQueue(clientName: string, onConnect?: OnConnect): P
                 // event published before this copy's realtime queue is bound
                 // could match no binding at all and land in snap.unrouted,
                 // which is there to catch typos, not real events.
-                if (onConnect) await onConnect(model)
+                if (onConnect) await onConnect(model, channel)
 
                 // Step 4: Open for publishing.
                 publishChannel = channel
