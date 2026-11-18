@@ -17,10 +17,11 @@ Traefik** — the backend runs as three copies behind one address.
 
 ## What it does
 
-- **Accounts** — register, log in; short-lived JWT access tokens refreshed automatically.
+- **Accounts** — register, log in; 15-minute JWT access tokens refreshed automatically with a
+  30-day refresh token. Login and registration are rate-limited.
 - **Friends** — add someone, they add you back, you're friends. Snaps only go to friends.
 - **Snaps** — a photo, with an optional caption, to one or many friends. It is opened through
-  a 5-minute presigned S3 link, and **only once**: the read that authorizes it also marks it viewed.
+  a presigned S3 link that lasts 5 minutes at most — never past the snap's expiry — and **only once**: the read that authorizes it also marks it viewed.
   The sender is told if you screenshot it. After 24 hours the photo and the row are deleted.
 - **Chat** — one-to-one messages with paged history and a conversation list.
 - **Live pushes** — new snaps, messages, friend requests and screenshots arrive over a

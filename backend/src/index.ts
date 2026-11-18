@@ -3,14 +3,39 @@ import fastify from "fastify";
 import auth from "./auth";
 import routes from "./http/routes";
 import fastifyMultipart from "@fastify/multipart";
+import rateLimit from "@fastify/rate-limit";
 import addGlobalErrorHandler from "./utils/errorHandler";
 import websocket from "./websocket";
+import { config } from "./config";
+import { TooManyRequests } from "./errors";
 import { closeQueue, connectQueue } from "./queue/connection";
 import { reconnectPhones, startRelay } from "./websocket/relay";
 
-const httpServer = fastify()
+// request.ip is the client's real address only behind a proxy we trust
+// (config.ts); the rate limit counts by it. Fastify 5.12 ignores a plain hop
+// count here on purpose — it can't check who the nearest hop is, so it trusts
+// nobody — which would make every client look like Traefik and share one
+// counter. So the same rule is given as a function, and the check is ours: in
+// the compose stack the api has no published port, so its nearest hop is
+// always Traefik. Without TRUST_PROXY_HOPS (the laptop), nothing is trusted.
+const httpServer = fastify({
+    trustProxy: config.trustProxyHops > 0
+        ? (_address: string, hop: number) => hop < config.trustProxyHops
+        : false,
+})
 
 addGlobalErrorHandler(httpServer);
+
+// Rate limits, only on routes that ask for one (routes.ts: /login, /register).
+// It runs after the body is parsed, so a route can count per username too. The
+// counters live in this copy's memory: behind Traefik's three copies the real
+// limit is three times the number set. A blocked request gets our own 429.
+await httpServer.register(rateLimit, {
+    global: false,
+    hook: "preHandler",
+    errorResponseBuilder: (_request, context) =>
+        new TooManyRequests(`Too many attempts, try again in ${context.after}.`),
+});
 
 // attachFieldsToBody puts every part on request.body — the file included, still
 // carrying .mimetype — instead of leaving them behind request.file(). Only

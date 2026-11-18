@@ -11,15 +11,31 @@ async function routes(httpServer: FastifyInstance) {
         handler: controllers.health
     })
 
+    // At most 20 new accounts per client IP a minute: room for a few typos and
+    // the e2e's seven, not for a script creating thousands.
     httpServer.route({
         method: 'POST',
         url: '/register',
+        config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
         handler: controllers.register
     })
 
+    // At most 5 tries a minute for one account from one IP — counted per
+    // account, so a typo on yours doesn't block someone else on the same
+    // Wi-Fi. Enough for a person, far too slow for guessing passwords.
     httpServer.route({
         method: 'POST',
         url: '/login',
+        config: {
+            rateLimit: {
+                max: 5,
+                timeWindow: '1 minute',
+                keyGenerator: (request) => {
+                    const username = (request.body as { username?: unknown } | undefined)?.username
+                    return `${request.ip}|${typeof username === 'string' ? username : ''}`
+                },
+            },
+        },
         handler: controllers.login
     })
 

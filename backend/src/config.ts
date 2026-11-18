@@ -25,8 +25,28 @@ function positiveInt(name: string, fallback: number): number {
     return value
 }
 
+// Optional whole number, 0 allowed. Empty counts as unset.
+function wholeNumber(name: string, fallback: number): number {
+    const raw = process.env[name]
+    if (!raw) return fallback
+
+    const value = Number(raw)
+    if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error(`${name} must be a whole number, 0 or more, got "${raw}"`)
+    }
+    return value
+}
+
 export const config = {
     rabbitmqUrl: required('RABBITMQ_URL'),
+
+    // How many proxies in front of the api to believe about the client's IP.
+    // Behind Traefik it's 1: Traefik adds the real client IP as the last entry
+    // of X-Forwarded-For, and only that entry is trusted — whatever a client
+    // puts in the header itself comes before it and is ignored. Directly on the
+    // laptop it's 0, so a client can't claim any IP at all. The rate limit
+    // counts per client IP, so a wrong value would let anyone dodge it.
+    trustProxyHops: wholeNumber('TRUST_PROXY_HOPS', 0),
 
     // Names this process in RabbitMQ: the connection name in the web UI and the
     // appId on every event it publishes. In Kubernetes the hostname is the pod

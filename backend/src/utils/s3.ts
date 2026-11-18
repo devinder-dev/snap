@@ -3,7 +3,7 @@ import { S3Client } from 'bun'
 // Presigned GETs for snaps should be short-lived — the URL is a bearer token
 // for that object, and anyone holding it can read the snap until it expires.
 // Bun's own default is 24 hours, which is far too long for this.
-const DEFAULT_EXPIRY_SECONDS = 300
+export const DEFAULT_EXPIRY_SECONDS = 300
 
 // Bun loads .env into process.env at startup. Fail here rather than on the
 // first upload: missing credentials are a config mistake, not a runtime state.

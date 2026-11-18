@@ -31,6 +31,11 @@ Protected routes need `Authorization: Bearer <access_token>`. Every error has th
 same shape: `{ "success": false, "code": 400, "message": "…" }`, and `message` is
 written for the user.
 
+Tokens: the access token lasts 15 minutes, the refresh token 30 days. `/login` allows
+5 tries a minute per account and client IP, `/register` 20 a minute per IP; past
+that the answer is `429`. The counters live in each api copy's memory, so behind
+Traefik's three copies the real limit is three times as high.
+
 | Method | URL                        | Body / query              | Response                                   |
 | ------ | -------------------------- | ------------------------- | ------------------------------------------ |
 | POST   | `/register`                | `{ username, password }`  | `201 { tokens, user }`                     |

@@ -17,9 +17,11 @@ const generateFreshTokens = async (
         { ...payload, type: "access" },
         { expiresIn: "15m" },
     );
+    // 30 days: a stolen refresh token stops working within a month. The app
+    // refreshes on its own, so only someone idle that long has to log in again.
     const newRefreshToken = await reply.jwtSign(
         { ...payload, type: "refresh" },
-        { expiresIn: "10y" },
+        { expiresIn: "30d" },
     );
 
     return {

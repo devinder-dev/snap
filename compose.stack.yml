@@ -25,6 +25,9 @@ x-backend: &backend
   environment:
     DATABASE_URL: postgresql://postgres:postgres@postgres:5432/snap
     RABBITMQ_URL: amqp://snap:snap@rabbitmq:5672
+    # Traefik is the one proxy in front of the api: believe its
+    # X-Forwarded-For entry, and only that one (backend/src/config.ts).
+    TRUST_PROXY_HOPS: "1"
 
 # One image for the api, the worker and the sweep (backend/Dockerfile).
 x-app-image: &app-image

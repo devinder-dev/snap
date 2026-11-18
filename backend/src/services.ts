@@ -226,8 +226,16 @@ export async function getSnap(username: string, snapId: string): Promise<ApiSnap
         type: 'photo',
         // Null when the S3 upload never landed. The snap row still exists, so
         // hand back what there is rather than failing the whole read.
-        media_url: snap.media_key ? s3.getPresignedUrl(snap.media_key) : undefined,
+        media_url: snap.media_key ? s3.getPresignedUrl(snap.media_key, linkSeconds(snap.expires_at)) : undefined,
     }
+}
+
+// A photo link works for 5 minutes, but never past the snap's own expiry:
+// "gone after 24 hours" should hold for the link too. At least 1 second — a
+// snap this close to expiring was still claimable a moment ago.
+function linkSeconds(expiresAt: Date): number {
+    const left = Math.floor((expiresAt.getTime() - Date.now()) / 1000)
+    return Math.max(1, Math.min(s3.DEFAULT_EXPIRY_SECONDS, left))
 }
 
 // What's waiting for this user. Metadata only — reading a snap's content is

@@ -25,6 +25,7 @@ import { sql } from 'bun'
 import { io, type Socket } from 'socket.io-client'
 import * as services from '../src/services'
 import * as s3 from '../src/utils/s3'
+import { hideSecrets } from './hide-secrets'
 
 const BASE_URL = (process.env.E2E_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '')
 const OTHER_URL = (process.env.E2E_OTHER_URL ?? BASE_URL).replace(/\/$/, '')
@@ -69,7 +70,8 @@ function check(name: string, ok: boolean, detail?: unknown): void {
         console.log(`  ✓ ${name}`)
     } else {
         failures.push(name)
-        console.log(`  ✗ ${name}`, detail === undefined ? '' : detail)
+        // Never the raw response: CI logs are public, and responses carry tokens.
+        console.log(`  ✗ ${name}`, detail === undefined ? '' : hideSecrets(detail))
     }
 }
 
@@ -214,6 +216,16 @@ try {
 
         const wrong = await api('POST', '/login', { json: { username: users.anna, password: 'wrong password' } })
         check('login with the wrong password is 401', wrong.status === 401, wrong)
+
+        // The rate limit: 5 tries a minute per account and IP, counted in each
+        // copy. Straight to one copy the 6th try gets the 429; through Traefik's
+        // three, 16 tries make sure one copy has seen 6 (3 × 5 = 15).
+        let first429 = 0
+        for (let attempt = 1; attempt <= 16 && first429 === 0; attempt++) {
+            const tryLogin = await api('POST', '/login', { json: { username: `zzt_${run}_guess`, password: 'guess' } })
+            if (tryLogin.status === 429) first429 = attempt
+        }
+        check(`login is rate-limited: first 429 on try ${first429 || 'none'} (6th per copy)`, first429 >= 6 && first429 <= 16)
 
         const login = await api('POST', '/login', { json: { username: users.anna, password: PASSWORD } })
         check('login with the right password is 200', login.status === 200 && login.body?.user?.username === users.anna, login)
