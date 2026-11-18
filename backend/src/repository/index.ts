@@ -354,8 +354,8 @@ export async function getExpiredSnaps(
 }
 
 // One snap, but only if it's past expires_at: what the worker checks before
-// deleting anything, so it never trusts the timer alone (SCALING-PLAN.md
-// section 9, rule 6). Null when the snap isn't due yet or is already gone.
+// deleting anything, so it never trusts the timer alone. Null when the snap
+// isn't due yet or is already gone.
 export async function getExpiredSnapById(id: string): Promise<ExpiredSnap | null> {
     const [row] = await sql`
         SELECT id, media_key

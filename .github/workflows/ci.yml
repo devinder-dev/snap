@@ -1,4 +1,4 @@
-# CI/CD for Snap (SCALING-PLAN.md Step 9). On every push, to any branch:
+# CI/CD for Snap. On every push, to any branch:
 #
 #   checks   no secrets committed; the backend and the app typecheck; unit tests
 #   stack    both images built; the whole stack started in compose (3 api copies,

@@ -98,7 +98,7 @@ export function createSetup(onConnect?: OnConnect): (model: ChannelModel) => Pro
                 if (channel === publishChannel) publishChannel = null
             })
 
-            // Step 2: Every exchange, queue and binding from section 5.
+            // Step 2: Every exchange, queue and binding (queue/topology.ts).
             await declareTopology(channel)
 
             // Step 3: This process's consumers, BEFORE publishing opens. An

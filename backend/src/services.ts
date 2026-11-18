@@ -256,7 +256,7 @@ export async function reportScreenshot(username: string, snapId: string): Promis
 }
 
 
-// One snap whose timer ran out (the worker, SCALING-PLAN.md 7.2). Same order as
+// One snap whose timer ran out (called by the worker). Same order as
 // the sweep below: the S3 object first, then the row.
 //
 // Returns false when there was nothing to do: the snap is already gone (the

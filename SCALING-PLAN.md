@@ -1,5 +1,8 @@
 # Snap — scaling plan: several servers and RabbitMQ
 
+*A local working document: not in the repository since 2026-11-18 (version 4.2). Code and
+committed docs never point to it.*
+
 Status: **Step 9b done** (2026-11-18), **plan version 4.1** (2026-11-18). The whole backend runs
 as it will on the server: `docker compose` starts Traefik in front of three api copies, the
 worker, and the migrations before them. Every live push goes through RabbitMQ, so a message
@@ -33,6 +36,20 @@ push.
 | 3.2 | 2026-10-21 | Local Docker setup: Snap's own Postgres, ports for this laptop only |
 | 4 | 2026-11-17 | **docker compose + Traefik** instead of Kubernetes for Steps 6–12; Step 8 dropped |
 | 4.1 | 2026-11-18 | **Step 9b** added: fixes from an independent code review; more checks for Steps 10–11 |
+| 4.2 | 2026-11-18 | This plan leaves GitHub: kept on the laptop only; comments in the repo stand on their own. A comment pass at the end (Step 12) |
+
+### Version 4.2 — the plan stays on the laptop (2026-11-18)
+
+**Why:** Devinder's choice — the plan is a working document (status, process, test notes), not
+part of the public project. The repo's README and code comments explain the system on their
+own; the public write-up of the decisions comes in Step 12.
+
+| Topic | Before | After | Why |
+|---|---|---|---|
+| `SCALING-PLAN.md` | Committed, linked from the README | Untracked, hidden in `.git/info/exclude`, kept up to date locally | Not public |
+| References in the repo | ~35 comments like "see SCALING-PLAN.md section 9, rule 7" | Comments that explain themselves; the topology picture moved into `queue/topology.ts` | A public reader can't follow a link into a file they don't have |
+| Git history | The plan is in 13 older commits | Left as it is (no rewrite) | A rewrite would change every commit hash and break the ghcr image tags; nothing in the plan is secret |
+| Comments at the end | – | Step 12: GitHub keeps only short, important comments; the fully commented version stays local | Devinder's choice (see Step 12) |
 
 ### Version 4.1 — Step 9b, fixes from a code review (2026-11-18)
 
@@ -1252,6 +1269,10 @@ backup restores into an empty database.
       Android APK — check what SDK 54 supports at that point).
 - [ ] Root `README.md`, final version: what it is, the diagrams, "follow one message across
       copies", the numbers, how to run it.
+- [ ] *Added in version 4.2:* **comment pass for GitHub.** When everything else is done, the
+      repository keeps only short, to-the-point comments that say something the code doesn't
+      (why, not what); obvious ones go. The fully commented version stays on the laptop — how
+      (a local-only branch or tag, never pushed, or a copy) is decided then.
 - [ ] `docs/architecture-decisions.md`: the decisions from section 1 with their trade-offs — why
       RabbitMQ and not the Redis adapter, why push-only sockets, why no sticky sessions, why the
       timer *and* the sweep, why docker compose and not Kubernetes for this project (version 4),

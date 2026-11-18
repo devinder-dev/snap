@@ -1,5 +1,4 @@
-// `bun run dead-letters <list|replay|purge>`: snap.dead.queue, by hand
-// (SCALING-PLAN.md section 8).
+// `bun run dead-letters <list|replay|purge>`: snap.dead.queue, by hand.
 //
 //   list    show what's parked and why; it stays parked
 //   replay  send every parked job back to the worker, attempt count reset to 1

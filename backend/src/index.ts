@@ -51,7 +51,7 @@ await httpServer.listen({ port, host });
 
 console.log(`Listening on http://${host}:${port}`);
 
-// Graceful shutdown (SCALING-PLAN.md section 9, rule 7). `docker stop` and every
+// Graceful shutdown. `docker stop` and every
 // deploy send SIGTERM, then kill the process 10 s later; Ctrl-C sends SIGINT.
 // Bun ignores SIGTERM unless something listens for it, so without this every
 // stop would end in that kill.

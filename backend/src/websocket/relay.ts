@@ -20,7 +20,7 @@ import { getWebsocketServer } from './server'
 // copy might never see the message meant for him.
 
 // Specific patterns, never '#': '#' would match a typo'd routing key too, and
-// the alternate exchange could never catch one (SCALING-PLAN.md section 5).
+// the alternate exchange could never catch one.
 // A typo after a valid prefix ('message.cretaed') still matches here: the
 // relay logs it as unknown and drops it, it doesn't reach snap.unrouted.
 const PATTERNS = ['message.*', 'snap.*', 'friend.*']
