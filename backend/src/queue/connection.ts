@@ -34,7 +34,9 @@ export function getPublishChannel(): ConfirmChannel | null {
 }
 
 // `clientName` shows in the web UI's Connections tab, e.g. snap-api@<pod name>.
-export async function connectQueue(clientName: string, onConnect?: OnConnect): Promise<void> {
+// `onReady` runs after each connection amqplib has accepted — setup done, its
+// own watching in place — never for an attempt that failed half-way.
+export async function connectQueue(clientName: string, onConnect?: OnConnect, onReady?: () => void): Promise<void> {
     connection = await connect(config.rabbitmqUrl, {
         clientProperties: { connection_name: `${clientName}@${config.instanceId}` },
         recovery: {
@@ -46,46 +48,13 @@ export async function connectQueue(clientName: string, onConnect?: OnConnect): P
 
             // Runs after every successful (re)connect, before 'connect' fires. If
             // it throws, amqplib closes that connection and tries again later.
-            async setup(model: ChannelModel) {
-                // amqplib only starts watching this connection for a close
-                // after setup() has returned. A close in between — after the
-                // last step below, before amqplib looks — would go unnoticed
-                // and leave a dead connection that looks connected. So watch
-                // it ourselves during setup, and fail the attempt if it closed.
-                let closedDuringSetup = false
-                const onClose = () => { closedDuringSetup = true }
-                model.once('close', onClose)
-
-                try {
-                    // Step 1: The channel to publish on, in confirm mode.
-                    const channel = await model.createConfirmChannel()
-                    watchChannel(model, channel, 'publish')
-                    channel.on('close', () => {
-                        if (channel === publishChannel) publishChannel = null
-                    })
-
-                    // Step 2: Every exchange, queue and binding from section 5.
-                    await declareTopology(channel)
-
-                    // Step 3: This process's consumers, BEFORE publishing opens. An
-                    // event published before this copy's realtime queue is bound
-                    // could match no binding at all and land in snap.unrouted,
-                    // which is there to catch typos, not real events.
-                    if (onConnect) await onConnect(model, channel)
-
-                    // Step 4: Open for publishing — unless the connection closed
-                    // meanwhile: then this attempt failed, and amqplib tries again.
-                    if (closedDuringSetup) throw new Error('RabbitMQ connection closed during setup')
-                    publishChannel = channel
-                } finally {
-                    model.off('close', onClose)
-                }
-            },
+            setup: createSetup(onConnect),
         },
     })
 
     connection.on('connect', () => {
         console.log('RabbitMQ connected, topology declared')
+        onReady?.()
     })
 
     connection.on('disconnect', (err: AmqpError) => {
@@ -101,6 +70,54 @@ export async function connectQueue(clientName: string, onConnect?: OnConnect): P
     // Recovery passes connection errors on here. Without a listener they would
     // crash the process; 'disconnect' follows and logs the same thing.
     connection.on('error', () => {})
+}
+
+// What runs on every fresh connection, before amqplib hands it over. Its own
+// function so a test can drive it with a fake connection (connection.test.ts).
+export function createSetup(onConnect?: OnConnect): (model: ChannelModel) => Promise<void> {
+    return async (model: ChannelModel) => {
+        // amqplib only starts watching this connection after setup() has
+        // returned, so watch it ourselves meanwhile:
+        //   - 'error': the connection passes socket errors on as an 'error'
+        //     event, and an 'error' event that nobody listens to crashes the
+        //     process. Note it and carry on: the close follows, and the step
+        //     in progress fails.
+        //   - 'close': fail this attempt even if every step had succeeded,
+        //     and amqplib connects again.
+        let closedDuringSetup = false
+        const onClose = () => { closedDuringSetup = true }
+        const onError = (err: AmqpError) => { console.warn(`⚠️ RabbitMQ error during setup: ${describe(err)}`) }
+        model.once('close', onClose)
+        model.on('error', onError)
+
+        try {
+            // Step 1: The channel to publish on, in confirm mode.
+            const channel = await model.createConfirmChannel()
+            watchChannel(model, channel, 'publish')
+            channel.on('close', () => {
+                if (channel === publishChannel) publishChannel = null
+            })
+
+            // Step 2: Every exchange, queue and binding from section 5.
+            await declareTopology(channel)
+
+            // Step 3: This process's consumers, BEFORE publishing opens. An
+            // event published before this copy's realtime queue is bound
+            // could match no binding at all and land in snap.unrouted,
+            // which is there to catch typos, not real events.
+            if (onConnect) await onConnect(model, channel)
+
+            // Step 4: Open for publishing — unless the connection closed
+            // meanwhile: then this attempt failed, and amqplib tries again.
+            if (closedDuringSetup) throw new Error('RabbitMQ connection closed during setup')
+            publishChannel = channel
+        } finally {
+            // Safe to stop here: between setup() returning and amqplib adding
+            // its own listeners there is no waiting, so no event can arrive.
+            model.off('close', onClose)
+            model.off('error', onError)
+        }
+    }
 }
 
 // Runs every time a connection attempt fails: RabbitMQ unreachable, a refused

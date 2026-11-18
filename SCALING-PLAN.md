@@ -50,6 +50,14 @@ public internet, not about bugs that were already there.
 | Rule 1 "at least once" | One promise for everything | A guarantee per hop (section 9) | RabbitMQ's own dead-letter moves are at most once |
 | Steps 10 and 11 | – | More checks from the review (marked there) | Backpressure, readiness, shutdown, production compose, rollout and restore tests |
 
+**Part 2 (same day):** the reviewer read the fixes too. Four more points held up and were
+fixed the same way (part 2 in Step 9b): phones that connect *before* a copy's first relay start
+missed the resync; an `error` event during `setup()` had no listener and would crash the
+process; a photo could be attached to an already expired snap; and paging the sweep by
+timestamp could repeat the same page forever (millisecond vs microsecond). Replay now targets
+the work queue by name. One claim didn't hold: a close slipping in between `setup()` returning
+and amqplib's own listener — nothing waits in between, so no event can arrive there.
+
 ### Version 4 — docker compose instead of Kubernetes (2026-11-17)
 
 **Why:** Kubernetes is already shown in another project of mine, Relay (k3s on a VPS, CI/CD,
@@ -562,7 +570,7 @@ refetches.
 | What | Effect | Recovery |
 |---|---|---|
 | HTTP API | Works normally — all data goes to Postgres | – |
-| Live pushes | Paused (publishes are logged and dropped) | When a copy's relay is rebuilt, it closes its phones' socket connections, so they reconnect and the app refetches *(Step 9b)* |
+| Live pushes | Paused (publishes are logged and dropped) | Every time a copy's relay starts — after a blip, and also the first time, if phones connected while RabbitMQ was still down — it closes its phones' socket connections, so they reconnect and the app refetches *(Step 9b)* |
 | Snap timers | Not started for snaps sent during the outage | Hourly safety net deletes them |
 | API / worker | Keep retrying the connection (1 s → 30 s backoff) | Re-declare topology and consumers on reconnect |
 
@@ -606,8 +614,10 @@ is already invisible to users, and the hourly safety net deletes it once the cau
    | API → `snap.events` (live pushes) | **Best effort.** Dropped and logged while RabbitMQ is down (7.6) |
 
    So the promise "every expired snap is deleted" rests on **Postgres and the sweep**, not on
-   RabbitMQ: the timer makes deletion *timely*, the hourly sweep makes it *certain* (at most an
-   hour late).
+   RabbitMQ: the timer makes deletion *timely*, the sweep makes it *certain*. "Within about an
+   hour" is a goal, not a guarantee: it holds while the hourly sweep runs and succeeds, so Step 10
+   adds a warning on the oldest expired row. Photos whose upload was interrupted fall to the
+   bucket's 2-day lifecycle rule instead.
 2. **Postgres first, then publish.** An event is only published after the write is committed.
 3. **Ack after the work is done.** If the worker crashes mid-job, the unacked message is
    redelivered.
@@ -1123,6 +1133,33 @@ breaking a normal reconnect. Before the fixes, Dependabot's backend group and am
 wrong-password and 406 exits, a RabbitMQ restart with the relay and worker rebuilt, SIGTERM,
 retries → dead letter → replay. After the fixes: e2e 67 of 67, tsc and actionlint clean.
 
+**Part 2 — the fixes, reviewed (2026-11-18)**
+
+- [x] The phones are reset after **every** relay start, including the first, from amqplib's
+      `connect` event (`connectQueue(…, onReady)`), so never for an attempt that fails later.
+- [x] `setup()` also listens for `error` while it runs; it moved into `createSetup()` so a unit
+      test can drive it with a fake connection — the repo's first `bun test`, now in CI.
+- [x] `setSnapMedia()` refuses an expired snap; a database error while attaching keeps the
+      object (the update may have been saved) and logs it.
+- [x] The sweep pages by `id` with one cutoff per run from the database's clock.
+- [x] `dead-letters replay` publishes straight into `snap.expire.queue` by name.
+- [x] Docs: "within about an hour" is a goal (Step 10 warns on the oldest expired row); 7.6;
+      two gotchas.
+
+**Result:** the same script ran on `main` before part 2 (68a8606) and on the fixed code; the
+unit test went red first, then green.
+
+| Point | Before | After |
+|---|---|---|
+| `error` during setup (unit test, fake connection) | `emit('error')` throws — in a real process, a crash | caught; the attempt fails and amqplib retries |
+| Phone connects while RabbitMQ is down, then RabbitMQ comes up | the first relay start reset nobody: no reconnect in 75 s | `transport close`, reconnected 3.9 s after connecting |
+| Replay with a diagnostic queue on `snap.expire` and the work queue deleted | "✅ Replayed 1 job(s)" — into the diagnostic queue | exit 1, "no queue took it", the job stays parked |
+| Attach a photo to an expired snap | attached | refused |
+| Sweep, 120 expired rows within one millisecond, S3 unreachable | still running after 8 s: **192 800** failed deletes logged for 120 rows (the same page, again and again) | one pass, exit 1, "0 deleted, 120 could not be" |
+
+The S3 calls in the sweep test went to a closed local port (`S3_ENDPOINT`), not to AWS. After
+the fixes: e2e 67 of 67, `bun test` 3 of 3, tsc and actionlint clean.
+
 ### Step 10 — Ready for the public internet
 
 *Unchanged in version 3 apart from its number (was Step 8); version 4 only changes "pod" to
@@ -1147,7 +1184,8 @@ retries → dead letter → replay. After the fixes: e2e 67 of 67, tsc and actio
       jobs; one shutdown promise per process that stops recovery first; `/health/ready` also
       reports whether this copy's relay is running, and logs a warning when RabbitMQ stays
       unreachable (a wrong vhost or TLS setting retries forever today); cap a photo link's
-      lifetime at the snap's remaining life; e2e checks with a definite "object gone"
+      lifetime at the snap's remaining life; a warning when the oldest expired row is more than
+      an hour old, and when a sweep run fails; e2e checks with a definite "object gone"
       (`HEAD` through the S3 client, not "not 200"); a CI test for a missing retry route;
       Fastify trusts client-IP headers only from Traefik (for the rate limit).
 
@@ -1339,6 +1377,13 @@ afterwards.
   "RabbitMQ handled it", not "a queue has it": a publish to a deleted queue, or to an exchange
   with no binding, is confirmed and dropped. Publish with `mandatory` and treat a returned
   message as a failure (`queue/delivered.ts`).
+- **An `error` event with no listener crashes the process** — in Node and in Bun. amqplib's
+  connection object passes socket errors on as `error` events, and during `setup()` amqplib
+  hasn't attached its own listener yet. Listen for `error` during setup (Step 9b,
+  `connection.test.ts`).
+- **A JavaScript `Date` has milliseconds, a Postgres `timestamptz` has microseconds.** Paging
+  by a timestamp that goes through JavaScript can return the same page forever. Page by `id`
+  (Step 9b, the sweep).
 - **CI green doesn't cover reconnects, retries or dead letters.** The e2e tests the happy path
   across copies; the RabbitMQ failure paths (Steps 2–5) were tested by hand. A Dependabot bump
   of `amqplib` or `socket.io` needs those manual checks too, or a test for them (Step 9).

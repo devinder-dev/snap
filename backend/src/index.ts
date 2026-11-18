@@ -6,7 +6,7 @@ import fastifyMultipart from "@fastify/multipart";
 import addGlobalErrorHandler from "./utils/errorHandler";
 import websocket from "./websocket";
 import { closeQueue, connectQueue } from "./queue/connection";
-import { startRelay } from "./websocket/relay";
+import { reconnectPhones, startRelay } from "./websocket/relay";
 
 const httpServer = fastify()
 
@@ -34,8 +34,10 @@ await httpServer.register(websocket)
 
 // RabbitMQ. This returns at once, even while RabbitMQ is down: amqplib keeps
 // connecting in the background, and the HTTP API works without it. On every
-// (re)connect the relay starts again: this copy's queue for live pushes.
-await connectQueue('snap-api', startRelay)
+// (re)connect the relay starts again: this copy's queue for live pushes. Once
+// RabbitMQ has accepted that connection, the phones connected here are made to
+// reconnect and refetch what they missed (relay.ts).
+await connectQueue('snap-api', startRelay, reconnectPhones)
 httpServer.addHook('onClose', closeQueue)
 
 const port = Number(process.env.PORT ?? 3000);

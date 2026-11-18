@@ -75,24 +75,21 @@ export async function startRelay(model: ChannelModel): Promise<void> {
     })
 
     console.log(`✅ Relay listening on ${queue}`)
-
-    // Step 4: A rebuilt relay missed every event while it was down — the old
-    // queue went with the old connection — and the phones that stayed connected
-    // to this copy can't know that. Not on the first start: nobody is connected
-    // yet, and there is nothing to have missed.
-    if (relayStarted) reconnectPhones()
-    relayStarted = true
 }
 
-// True once the relay has started at least once in this process.
-let relayStarted = false
-
+// After every relay start (index.ts calls this once RabbitMQ has accepted the
+// connection): a phone connected to this copy while the relay was down missed
+// every event of that time, and can't know it. That's after a RabbitMQ blip,
+// and also when this copy started while RabbitMQ was still down — phones can
+// connect before the first relay exists. With nobody connected (a normal
+// start) it does nothing.
+//
 // Closes every phone's connection to this copy, the way a dropped network
 // would ("transport close"), so each one reconnects by itself — maybe to
 // another copy — and the app refetches its lists on every connect. Each
 // connection on its own: engine.close() would also shut the WebSocket server,
 // and no phone could connect again.
-function reconnectPhones(): void {
+export function reconnectPhones(): void {
     const server = getWebsocketServer()
     if (!server) return
 

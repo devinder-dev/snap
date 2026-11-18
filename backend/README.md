@@ -11,6 +11,7 @@ bun install
 bun run migrate             # applies db/migrations (dbmate)
 bun run dev                 # http://localhost:3000
 bun run e2e                 # in a second terminal: the whole API end to end
+bun test                    # unit tests (src/**/*.test.ts), no services needed
 ```
 
 `bun run e2e` drives the running server the way the app does — HTTP for writes,

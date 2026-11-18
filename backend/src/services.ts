@@ -163,10 +163,15 @@ export async function sendSnap(input: SendSnapInput): Promise<SendSnapResponse> 
 
         await s3.uploadFile(key, input.image, input.mimetype)
 
-        // Null means the row vanished (or got media) during the upload. Then no
-        // row knows this key and nothing would ever delete the object: remove
-        // it now. (The bucket's 2-day lifecycle rule is only the last resort.)
-        const attached = await repository.setSnapMedia(createdSnap.id, key, input.mimetype)
+        // Null means the row vanished, expired or got media during the upload.
+        // Then no row knows this key and nothing would ever delete the object:
+        // remove it now. A database error is different — the update may have
+        // been saved with only its answer lost — so the object stays, and the
+        // bucket's 2-day lifecycle rule is the last resort if it wasn't.
+        const attached = await repository.setSnapMedia(createdSnap.id, key, input.mimetype).catch((err) => {
+            console.error(`❌ Attaching photo ${key} to snap ${createdSnap.id} failed; the object is kept`, err)
+            throw err
+        })
         if (!attached) {
             await s3.deleteFile(key).catch(() => {})
             throw new Error(`Snap ${createdSnap.id} was gone before its photo was attached`)
@@ -287,10 +292,14 @@ export type SweepResult = { deleted: number; failed: number }
 export async function deleteExpiredSnaps(): Promise<SweepResult> {
     let deleted = 0
     let failed = 0
-    let after: { expiresAt: Date; id: string } | null = null
+    let afterId: string | null = null
+
+    // One cutoff for the whole run, from the database's clock: snaps that
+    // expire while this run is busy wait for the next one.
+    const cutoff = await repository.getDatabaseNow()
 
     while (true) {
-        const expired = await repository.getExpiredSnaps(EXPIRY_BATCH_SIZE, after)
+        const expired = await repository.getExpiredSnaps(EXPIRY_BATCH_SIZE, cutoff, afterId)
         if (expired.length === 0) break
 
         const results = await Promise.allSettled(
@@ -316,10 +325,9 @@ export async function deleteExpiredSnaps(): Promise<SweepResult> {
         // A short batch means that was the last of them.
         if (expired.length < EXPIRY_BATCH_SIZE) break
 
-        // The next batch starts after this one's last row, so rows that failed
+        // The next batch starts after this one's last id, so rows that failed
         // here are skipped for the rest of this run instead of coming back.
-        const last = expired[expired.length - 1]!
-        after = { expiresAt: last.expires_at, id: last.id }
+        afterId = expired[expired.length - 1]!.id
     }
 
     return { deleted, failed }

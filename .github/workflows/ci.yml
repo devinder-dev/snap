@@ -1,6 +1,6 @@
 # CI/CD for Snap (SCALING-PLAN.md Step 9). On every push, to any branch:
 #
-#   checks   no secrets committed; the backend and the app typecheck
+#   checks   no secrets committed; the backend and the app typecheck; unit tests
 #   stack    both images built; the whole stack started in compose (3 api copies,
 #            the worker, Traefik, S3Mock); the e2e run twice — across two named
 #            copies, and through Traefik
@@ -61,6 +61,12 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bunx tsc --noEmit -p .
+
+      # Unit tests (*.test.ts): moments the e2e can't create on demand, such
+      # as a RabbitMQ error in the middle of a connection's setup.
+      - name: Unit tests
+        working-directory: backend
+        run: bun test
 
       - name: Typecheck the app
         working-directory: snap

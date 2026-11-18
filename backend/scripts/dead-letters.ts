@@ -13,7 +13,7 @@ import { connect, type ConfirmChannel } from 'amqplib'
 import { config } from '../src/config'
 import { jobProperties, readAttempt } from '../src/queue/attempts'
 import { publishDelivered } from '../src/queue/delivered'
-import { EXCHANGES, QUEUES } from '../src/queue/topology'
+import { QUEUES } from '../src/queue/topology'
 
 const COMMANDS = ['list', 'replay', 'purge']
 const command = process.argv[2] ?? ''
@@ -74,9 +74,12 @@ async function list(channel: ConfirmChannel, count: number): Promise<void> {
     }
 }
 
-// Each job goes back into snap.expire, exactly as the timer sends it, as
-// attempt 1. Publish, wait until snap.expire.queue really has it, then ack the
-// parked copy: if anything fails in between, the parked copy is still there.
+// Each job goes straight back into the work queue, snap.expire.queue, as
+// attempt 1 — by name, through the default exchange. Publish, wait until that
+// queue really has it, then ack the parked copy: if anything fails in between,
+// the parked copy is still there. (Not through the snap.expire exchange: any
+// other queue bound there, say one added to watch traffic, would also count as
+// "delivered" while the work queue itself was missing.)
 //
 // Only the `count` jobs that were parked when it started: a job that fails
 // again at once and comes straight back isn't replayed in a loop.
@@ -88,13 +91,12 @@ async function replay(channel: ConfirmChannel, count: number): Promise<void> {
         if (!msg) break
 
         try {
-            // snap.expire is a fanout exchange, so the routing key doesn't matter.
-            await publishDelivered(channel, EXCHANGES.expire, '', msg.content, jobProperties(msg, 1))
+            await publishDelivered(channel, '', QUEUES.expire, msg.content, jobProperties(msg, 1))
         } catch (err) {
             // Not acked, so closing the channel puts this job back where it was.
             const why = err instanceof Error ? err.message : String(err)
             console.error(`❌ Replay stopped after ${replayed} job(s): ${why}. `
-                + `The rest stay parked. Is ${QUEUES.expire} bound to ${EXCHANGES.expire}?`)
+                + `The rest stay parked. Does ${QUEUES.expire} exist?`)
             process.exitCode = 1
             return
         }
@@ -103,5 +105,5 @@ async function replay(channel: ConfirmChannel, count: number): Promise<void> {
         replayed++
     }
 
-    console.log(`✅ Replayed ${replayed} job(s) to ${EXCHANGES.expire}; a running worker picks them up now`)
+    console.log(`✅ Replayed ${replayed} job(s) to ${QUEUES.expire}; a running worker picks them up now`)
 }

@@ -181,8 +181,10 @@ export async function createSnap(input: CreateSnapInput): Promise<SnapRow> {
 //
 // The WHERE clause is the guard: it matches only a photo snap whose media_key is
 // still null, so a retried or duplicated upload can't overwrite media already
-// attached. Returns null when nothing matched — snap missing, wrong type, or
-// media already set.
+// attached — and only one that hasn't expired, since the sweep may already have
+// read it (with no key) and be about to delete the row, which would leave the
+// photo behind. Returns null when nothing matched — snap missing, expired, wrong
+// type, or media already set.
 //
 // The key should be random (crypto.randomUUID()), not the snap id: it travels
 // inside every presigned URL, and a sequential id there would leak the snap count.
@@ -197,6 +199,7 @@ export async function setSnapMedia(
         WHERE id = ${snapId}
           AND type = 'photo'
           AND media_key IS NULL
+          AND expires_at > now()
         RETURNING *
     `
     return (row as SnapRow | undefined) ?? null
@@ -317,33 +320,36 @@ export async function getIncomingFriendRequests(username: string): Promise<Incom
     return rows as IncomingFriendRequest[]
 }
 
-// Snaps past expires_at, oldest first, a batch at a time. The expiry job
-// deletes the S3 object before the row, so it needs the key while the row
-// still exists — hence a SELECT here rather than DELETE..RETURNING.
+// The database's clock, once per sweep: one cutoff for the whole run. Read into
+// JavaScript it loses its microseconds, which only moves it slightly earlier —
+// a snap is never deleted before its time, at most a run later.
+export async function getDatabaseNow(): Promise<Date> {
+    const [row] = await sql`SELECT now() AS now`
+    return (row as { now: Date }).now
+}
+
+// Snaps past `cutoff`, a batch at a time. The expiry job deletes the S3 object
+// before the row, so it needs the key while the row still exists — hence a
+// SELECT here rather than DELETE..RETURNING.
 //
-// `after` is where the previous batch ended. Paging by (expires_at, id) rather
-// than always taking the oldest means a row whose S3 delete failed stays behind
-// that point, so it can't block the rows after it; the next run retries it.
+// Paged by id, after the previous batch's last id. Ids only grow, so every run
+// ends, and a row whose S3 delete failed stays behind that point: it can't
+// block the rows after it, and the next run tries it again. (Paging by
+// expires_at instead broke on precision: Postgres keeps microseconds, a
+// JavaScript Date only milliseconds, so the same page could come back forever.)
 export async function getExpiredSnaps(
     limit: number,
-    after: { expiresAt: Date; id: string } | null = null
+    cutoff: Date,
+    afterId: string | null
 ): Promise<ExpiredSnap[]> {
-    const rows = after
-        ? await sql`
-            SELECT id, media_key, expires_at
-            FROM snaps
-            WHERE expires_at <= now()
-              AND (expires_at, id) > (${after.expiresAt}, ${after.id}::bigint)
-            ORDER BY expires_at, id
-            LIMIT ${limit}
-        `
-        : await sql`
-            SELECT id, media_key, expires_at
-            FROM snaps
-            WHERE expires_at <= now()
-            ORDER BY expires_at, id
-            LIMIT ${limit}
-        `
+    const rows = await sql`
+        SELECT id, media_key
+        FROM snaps
+        WHERE expires_at <= ${cutoff}
+          AND id > ${afterId ?? '0'}::bigint
+        ORDER BY id
+        LIMIT ${limit}
+    `
     return rows as ExpiredSnap[]
 }
 
@@ -352,7 +358,7 @@ export async function getExpiredSnaps(
 // section 9, rule 6). Null when the snap isn't due yet or is already gone.
 export async function getExpiredSnapById(id: string): Promise<ExpiredSnap | null> {
     const [row] = await sql`
-        SELECT id, media_key, expires_at
+        SELECT id, media_key
         FROM snaps
         WHERE id = ${id}
           AND expires_at <= now()
