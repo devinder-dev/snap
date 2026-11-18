@@ -42,7 +42,7 @@ x-tools-image: &tools-image
 
 services:
   traefik:
-    image: traefik:v3.7.15
+    image: traefik:v3.7.19
     restart: unless-stopped
     ports:
       # All interfaces, so a phone on the same Wi-Fi can reach it.
