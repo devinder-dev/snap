@@ -208,8 +208,8 @@ try {
         const again = await api('POST', '/register', { json: { username: users.anna, password: PASSWORD } })
         check('registering a taken username is 409', again.status === 409, again)
 
-        const noPassword = await api('POST', '/register', { json: { username: `zzt_${run}_x` } })
-        check('registering without a password is 400', noPassword.status === 400, noPassword)
+        const missingField = await api('POST', '/register', { json: { username: `zzt_${run}_x` } })
+        check('registering without a password is 400', missingField.status === 400, missingField)
 
         const tooLong = await api('POST', '/register', { json: { username: 'z'.repeat(33), password: PASSWORD } })
         check('a 33-character username is 400', tooLong.status === 400, tooLong)
