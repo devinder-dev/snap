@@ -1,14 +1,15 @@
 # Snap — scaling plan: several servers and RabbitMQ
 
-Status: **Step 7 done** (2026-11-17), **plan version 4** (2026-11-17). The app runs on its own
-S3 bucket, with a committed end-to-end test. The whole backend now runs on the laptop as it
-will on the server: `docker compose` starts Traefik in front of three api copies, the worker,
-and the migrations before them. Every live push goes through RabbitMQ, so a message reaches
-the phone whichever copy holds its socket; a copy that dies drops out of Traefik, and its
-phones reconnect to another one by themselves. A worker deletes each snap when its 24-hour
-timer runs out, retries a failed delete, then parks it in `snap.dead.queue` and warns;
-`bun run sweep` is the safety net. Steps 9–12 (CI, public-internet hardening, deploy to one
-VPS, proof) are not started (Step 8 was dropped). Version 4 runs the copies with **docker
+Status: **Step 9 done** (2026-11-18), **plan version 4** (2026-11-17). The whole backend runs
+as it will on the server: `docker compose` starts Traefik in front of three api copies, the
+worker, and the migrations before them. Every live push goes through RabbitMQ, so a message
+reaches the phone whichever copy holds its socket; a copy that dies drops out of Traefik, and
+its phones reconnect to another one by themselves. A worker deletes each snap when its 24-hour
+timer runs out, retries a failed delete, then parks it in `snap.dead.queue`. **GitHub Actions**
+now runs that same stack and the e2e on every push, and on `main` publishes the images to
+ghcr.io (amd64 + arm64, tagged with the commit SHA); CodeQL and Dependabot watch the code and
+the dependencies. Steps 10–12 (public-internet hardening, deploy to one VPS, proof) are not
+started (Step 8 was dropped). Version 4 runs the copies with **docker
 compose behind Traefik** instead of Kubernetes — section 0 says what changed and why.
 Verified beforehand: `amqplib` 2.2 works under Bun 1.3.14, and every RabbitMQ feature used
 below (topic routing, alternate exchange, TTL → dead-letter timer, nack → dead-letter queue)
@@ -190,7 +191,7 @@ Kubernetes is shown in another project (Relay). Here the point is the realtime s
 | 6 | Docker image | ✅ 2026-11-17 |
 | 7 | Several copies on the laptop: docker compose + Traefik | ✅ 2026-11-17 |
 | 8 | ~~Kubernetes like production~~ | Dropped in version 4 |
-| 9 | CI/CD on every push | ⬜ |
+| 9 | CI/CD on every push | ✅ 2026-11-18 |
 | 10 | Ready for the public internet | ⬜ |
 | 11 | Deploy to one VPS with docker compose | ⬜ |
 | 12 | Proof and presentation | ⬜ |
@@ -993,7 +994,7 @@ them. What is still useful without Kubernetes moved:
 *Changed in version 4 — the stack runs in docker compose in GitHub Actions instead of a kind
 cluster.*
 
-- [ ] `.github/workflows/ci.yml`, on every push and pull request:
+- [x] `.github/workflows/ci.yml`, on every push and pull request:
   - **Typecheck** backend and app.
   - **Build** both image targets, tagged with the commit SHA.
   - **The whole stack** in compose: `docker-compose.yml` + `compose.stack.yml` +
@@ -1005,15 +1006,40 @@ cluster.*
     stand-in's hostname, which only resolves on the compose network — that's why the e2e runs
     there too.
   - **No secrets committed**: fail if a `.env` file is tracked or an AWS key (`AKIA…`) appears.
-- [ ] Security scans on every push, free for public repos: **CodeQL** reads the code for
+- [x] Security scans on every push, free for public repos: **CodeQL** reads the code for
       dangerous patterns; **Dependabot** warns about known holes in the npm packages and opens
       update pull requests.
-- [ ] On `main` only: push the `app` and `tools` images to ghcr.io, tagged with the commit SHA,
+- [x] On `main` only: push the `app` and `tools` images to ghcr.io, tagged with the commit SHA,
       built for amd64 and arm64 (section 14).
-- [ ] CI badge at the top of the README.
+- [x] CI badge at the top of the README.
 
 ✅ **Done when:** main is green; a deliberately broken relay makes the e2e in CI fail; the
 images appear under the repo's *Packages* on GitHub.
+
+**Result (2026-11-18):** `ci.yml` runs on every push: **checks** (no `.env` file or AWS key ID in
+git; both type checks), **stack** (both images built with the GitHub Actions layer cache; the
+whole stack started with `compose.ci.yml` — Adobe S3Mock 5.2.3 instead of S3, throwaway settings,
+no published ports; the e2e run twice, across `snap-api-1`/`snap-api-2` and through Traefik), and
+on `main` only **publish** (amd64 + arm64 through QEMU, tagged with the full commit SHA).
+`codeql.yml` scans the TypeScript and the workflows; `dependabot.yml` covers the backend (minor
+and patch grouped), the Dockerfile, the compose images (never a major Postgres) and the actions;
+the app gets security fixes only, since Expo SDK 54 pins its versions together. Every action is
+pinned to a commit SHA. `compose.stack.yml` now has an optional `env_file` and names that follow
+the compose project, so CI was rehearsed on the laptop first as project `snapci` on a copy without
+`.env` (both e2e runs 67 of 67) without touching the `snap` containers. actionlint: 0 problems;
+the secrets check was tested against a committed `.env` and AWS's example key ID (both fail).
+On GitHub: branch `ci/step-9` green (stack job 1 min 36 s); **a deliberately broken relay**
+(`relay(msg)` removed) turned the stack job red with **59 passed, 8 failed** — exactly the eight
+live-push checks — while the type check stayed green; `main` green, then
+`ghcr.io/devinder-dev/snap-app` and `snap-tools` tagged `eeac92e…` with `linux/amd64` and
+`linux/arm64`, **public** (pulled without a login) because they're linked to the public repo.
+Docker Hub login in CI uses a read-only token (`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`).
+Dependabot alerts and security fixes switched on with `gh api`; secret scanning and push
+protection were already on. First findings, for Step 10: CodeQL `js/missing-rate-limiting` on
+`/register` and `/login` (Step 10 adds the rate limit) and `js/clear-text-logging` in the e2e's
+`check()`, which prints a failing response — tokens included — to the (public) CI log.
+Dependabot's first pull requests: Traefik v3.7.15 → v3.7.19, and 8 backend updates (amqplib
+2.2.0 → 2.3.1 among them), both green in CI.
 
 ### Step 10 — Ready for the public internet
 
@@ -1209,6 +1235,13 @@ afterwards.
 - **`docker kill` doesn't trigger `restart: unless-stopped`** — Docker treats it as a manual
   stop. A copy whose process crashes on its own is restarted; one you kill stays down until
   `docker compose up -d` (Step 7).
+- **A script that checks image tags must tell "not found" from "rate limited"** (Step 9). In
+  Step 7 a tag check printed "not found" for a Docker Hub 429, so Traefik v3.7.15 was taken for
+  the newest version; Dependabot then offered v3.7.19. Check versions in the docs or with
+  Dependabot, not by probing many tags.
+- **CI green doesn't cover reconnects, retries or dead letters.** The e2e tests the happy path
+  across copies; the RabbitMQ failure paths (Steps 2–5) were tested by hand. A Dependabot bump
+  of `amqplib` or `socket.io` needs those manual checks too, or a test for them (Step 9).
 
 ---
 
