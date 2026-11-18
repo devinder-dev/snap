@@ -4,7 +4,7 @@
 // while RabbitMQ was down, dropped when snap.expiry.wait was deleted, or
 // dead-lettered because S3 was failing. The S3 object goes first, then the row.
 //
-// On the laptop you run it by hand; on the server cron runs it hourly (Step 11).
+// On the laptop you run it by hand; on a server, cron runs it hourly.
 // It used to run every 5 minutes inside the API — with three API copies that
 // would be three sweeps doing the same work. One run at a time is enough.
 

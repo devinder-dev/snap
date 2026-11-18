@@ -2,7 +2,7 @@ import type { ApiMessage } from '../http/types'
 import type { SnapType } from '../repository/types'
 
 // Every event the backend publishes to snap.events: its routing key, and the
-// JSON body that goes with it (SCALING-PLAN.md section 6).
+// JSON body that goes with it.
 //
 // One map, so `publishEvent('snap.created', payload)` only compiles when the
 // payload is the one that belongs to snap.created.

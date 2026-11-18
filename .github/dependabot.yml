@@ -1,4 +1,4 @@
-# Dependabot (SCALING-PLAN.md Step 9): pull requests that update dependencies,
+# Dependabot: pull requests that update dependencies,
 # each tested by CI before anyone merges it. Security fixes come on their own
 # as soon as a hole is known; the version updates below come once a week.
 

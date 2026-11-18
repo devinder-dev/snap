@@ -2,8 +2,14 @@ import type { Channel } from 'amqplib'
 import { config } from '../config'
 import type { RoutingKey } from './events'
 
-// Every exchange and queue Snap uses, and the one function that creates them.
-// The picture is in SCALING-PLAN.md section 5.
+// Every exchange and queue Snap uses, and the one function that creates them:
+//
+//   snap.events (topic) ── message.* · snap.* · friend.* ──▶ realtime.<copy>   (each api copy's relay)
+//        │  └──────────── snap.created ──▶ snap.expiry.wait ── TTL 24 h ──▶ snap.expire ──▶ snap.expire.queue (worker)
+//        │                                                                       ▲
+//        │                       snap.retry.wait ── TTL 30 s ────────────────────┘   (a failed job, tried again)
+//        └─ no binding matches ──▶ snap.unrouted ──▶ snap.unrouted.queue              (parked: a typo'd key)
+//   a job that failed every attempt ──▶ snap.dlx ──▶ snap.dead.queue                (parked for a human)
 //
 // Declaring is idempotent: asserting something that already exists with the
 // same settings does nothing. So every process runs declareTopology() on every
@@ -11,7 +17,9 @@ import type { RoutingKey } from './events'
 //
 // Asserting it with DIFFERENT settings fails with PRECONDITION_FAILED (406).
 // That's why SNAP_TTL_MS and SNAP_RETRY_DELAY_MS can't simply be changed once
-// the queues exist — see section 10 of the plan.
+// the queues exist: stop the apps, delete snap.expiry.wait / snap.retry.wait in
+// the web UI, and start again. Timers that were waiting are lost; the sweep
+// deletes those snaps instead.
 
 export const EXCHANGES = {
     // Every event the API publishes lands here first.

@@ -1,6 +1,6 @@
 import type { Message, Options } from 'amqplib'
 
-// The attempt counter every snap job carries (SCALING-PLAN.md 7.3). Our own
+// The attempt counter every snap job carries: 1 from the timer, +1 per retry. Our own
 // header, not RabbitMQ's x-death: x-death also records the 24-hour timer's own
 // dead-lettering, and a replay has to start the count again anyway.
 //

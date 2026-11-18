@@ -6,14 +6,14 @@
 A Snapchat-style app: send photo and text snaps that can be viewed once and disappear after
 24 hours, chat with friends, and get every update live.
 
-**Expo (React Native) · Bun · Fastify · PostgreSQL · AWS S3 · socket.io · RabbitMQ** — and, in
-progress, **Docker · Traefik** to run the backend as three copies behind one address.
+**Expo (React Native) · Bun · Fastify · PostgreSQL · AWS S3 · socket.io · RabbitMQ · Docker ·
+Traefik** — the backend runs as three copies behind one address.
 
-> **Status:** the app works end to end, and the backend can already run as several copies side
-> by side: live pushes cross between them through RabbitMQ, and a worker deletes each snap when
-> its 24-hour timer runs out. Next come retries and dead letters, then Docker, three copies
-> behind Traefik, CI and a deploy to one server — step by step, each step tested before the
-> next. The full plan and progress are in **[SCALING-PLAN.md](SCALING-PLAN.md)**.
+> **Status:** the backend runs as three copies behind Traefik. Live pushes cross between them
+> through RabbitMQ, and a worker deletes each snap when its 24-hour timer runs out, with retries,
+> a dead-letter queue and an hourly safety-net sweep. GitHub Actions starts that whole stack and
+> runs the end-to-end test on every push, then publishes the images to ghcr.io. Next: hardening
+> for the public internet, then a deploy to one server.
 
 ## What it does
 
@@ -66,7 +66,8 @@ pushes it. No sticky sessions needed — the app connects over WebSocket only.
 
 docker compose runs everything on one server: it restarts a copy that crashes, and Traefik only
 sends traffic to the copies that are healthy. Neither knows which copy holds whose socket —
-that's RabbitMQ's job. (Why docker compose and not Kubernetes: section 0 of the plan.)
+that's RabbitMQ's job. Docker compose rather than Kubernetes on purpose: three copies on one
+server are enough to prove that every push reaches its phone, with far less to run.
 
 ### Following one message across servers
 
@@ -120,7 +121,8 @@ so a lost or dead-lettered job never leaves a photo behind.
 backend/          Fastify API on Bun — routes, services, Postgres repository, S3, socket.io
   db/migrations/  SQL migrations (dbmate)
 snap/             Expo app (SDK 54, expo-router) — runs in Expo Go
-SCALING-PLAN.md   The scaling plan: design, RabbitMQ topology, docker compose, steps and progress
+infra/            Traefik and RabbitMQ settings
+compose.*.yml     the stack in containers: laptop (stack) and GitHub Actions (ci)
 ```
 
 ## Run it locally

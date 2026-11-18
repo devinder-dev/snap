@@ -1,4 +1,4 @@
-# CodeQL (SCALING-PLAN.md Step 9): GitHub reads the code for dangerous
+# CodeQL: GitHub reads the code for dangerous
 # patterns — injection, unsafe paths, secrets in logs — and lists what it finds
 # under the repository's Security tab. Free for public repositories.
 #

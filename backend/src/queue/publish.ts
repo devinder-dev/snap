@@ -8,7 +8,7 @@ import { EXCHANGES } from './topology'
 //
 // Fire-and-forget, like the socket emits it will replace: it returns nothing,
 // never throws, and never makes a request wait for RabbitMQ. While RabbitMQ is
-// down the event is logged and dropped (SCALING-PLAN.md 7.6): the app refetches
+// down the event is logged and dropped: the app refetches
 // when its socket reconnects, and the hourly sweep catches snaps that missed
 // their timer.
 export function publishEvent<K extends RoutingKey>(key: K, payload: EventPayload<K>): void {

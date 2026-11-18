@@ -13,18 +13,19 @@ import * as services from './services'
 // It deletes snaps whose 24 hours are up. Every snap.created also waits in
 // snap.expiry.wait, a queue nobody reads; when its TTL runs out RabbitMQ
 // dead-letters it to snap.expire, which drops it into snap.expire.queue —
-// read here (SCALING-PLAN.md 7.2).
+// read here.
 //
 // A job that fails is tried again 30 s later, up to SNAP_MAX_ATTEMPTS times,
-// then parked in snap.dead.queue for a human (7.3). Every 60 s the worker also
-// counts the two parking lots and warns when something new arrived (section 8).
+// then parked in snap.dead.queue for a human. Every 60 s the worker also
+// counts the two parking lots and warns when something new arrived.
 //
 // Several workers can run side by side. They all read the SAME queue, and
 // RabbitMQ gives each message to only one of them: they share the work. That's
 // the opposite of the relay, where every API copy has its own queue so that
 // every copy sees every event.
 
-// How many jobs one worker holds at once (section 9, rule 5).
+// How many jobs one worker holds at once: RabbitMQ never sends it more
+// unacked messages than this.
 const PREFETCH = 10
 
 // The parking lots: nothing reads them, so nobody notices them filling up
@@ -92,7 +93,7 @@ async function handle(channel: Channel, publish: ConfirmChannel, msg: ConsumeMes
             ? `🗑️ Snap ${snapId} expired: photo and row deleted (attempt ${attempt})`
             : `Snap ${snapId}: already gone or not expired yet, nothing to do`)
 
-        // Step 3: Done, so RabbitMQ can forget the message (rule 3: ack after the work).
+        // Step 3: Done, so RabbitMQ can forget the message — only now, after the work.
         settle(() => channel.ack(msg))
     } catch (err) {
         await onFailure(channel, publish, msg, snapId, attempt, err)
@@ -120,7 +121,7 @@ async function onFailure(
 
     // Step 2: Attempts left → a copy waits in snap.retry.wait, whose TTL sends
     // it back to snap.expire.queue. Ack the original only once the copy is
-    // really in that queue (rule 4) — sent through the default exchange, which
+    // really in that queue — sent through the default exchange, which
     // routes by queue name — or acking could lose the job for good.
     try {
         await publishDelivered(publish, '', QUEUES.retryWait, msg.content, jobProperties(msg, attempt + 1))
@@ -153,7 +154,7 @@ async function checkParkedQueues(): Promise<void> {
 
             if (messageCount > before) {
                 console.warn(`⚠️ ${queue} has ${messageCount} message(s) (+${messageCount - before}), `
-                    + 'see SCALING-PLAN.md section 8')
+                    + 'look with `bun run dead-letters list`')
             }
             lastCounts.set(queue, messageCount)
         } catch {
@@ -180,7 +181,7 @@ function readSnapId(msg: ConsumeMessage): string | null {
 // ack and nack throw if the channel closed while the job ran (RabbitMQ
 // restarted, say). Nothing to do then: RabbitMQ puts the unacked message back
 // and delivers it again after the reconnect, which is safe because deleting a
-// snap twice deletes nothing the second time (rule 1).
+// snap twice deletes nothing the second time.
 function settle(answer: () => void): void {
     try {
         answer()
@@ -189,7 +190,7 @@ function settle(answer: () => void): void {
     }
 }
 
-// Graceful shutdown (section 9, rule 7): `docker stop` sends SIGTERM and kills
+// Graceful shutdown: `docker stop` sends SIGTERM and kills
 // the process 10 s later; Ctrl-C sends SIGINT. A job cut off halfway isn't
 // lost — unacked, it comes back after a restart — but finishing it is cleaner.
 const SHUTDOWN_LIMIT_MS = 8_000

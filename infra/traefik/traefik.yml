@@ -1,5 +1,5 @@
 # Traefik's static settings for the laptop stack (compose.stack.yml).
-# SCALING-PLAN.md Step 7. Which copies get traffic is NOT written here: Traefik
+# Which copies get traffic is NOT written here: Traefik
 # reads it from the labels on the containers (the "docker" provider below).
 
 entryPoints:

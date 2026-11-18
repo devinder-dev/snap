@@ -1,4 +1,4 @@
-# The whole backend in containers, on the laptop (SCALING-PLAN.md Step 7):
+# The whole backend in containers, on the laptop:
 # Traefik in front of 3 api copies, the worker, and the migrations before them.
 # Layered on top of docker-compose.yml, which keeps Postgres and RabbitMQ:
 #
@@ -26,7 +26,7 @@ x-backend: &backend
     DATABASE_URL: postgresql://postgres:postgres@postgres:5432/snap
     RABBITMQ_URL: amqp://snap:snap@rabbitmq:5672
 
-# One image for the api, the worker and the sweep (Step 6).
+# One image for the api, the worker and the sweep (backend/Dockerfile).
 x-app-image: &app-image
   image: snap-app:local
   build:
@@ -77,8 +77,10 @@ services:
         condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
-    # "Is this process up" — /health never touches Postgres or RabbitMQ
-    # (section 9, rule 8). The image has no curl, so Bun makes the request.
+    # "Is this process up" — /health never touches Postgres or RabbitMQ: if
+    # it did, one database blip would mark every copy unhealthy at once, and
+    # Traefik would have nowhere to send traffic. The image has no curl, so
+    # Bun makes the request.
     healthcheck:
       test: ["CMD", "bun", "-e", "const r = await fetch('http://localhost:3000/health'); process.exit(r.ok ? 0 : 1)"]
       interval: 5s

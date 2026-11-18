@@ -1,4 +1,4 @@
-# The backend as a container image (SCALING-PLAN.md Step 6). Two targets:
+# The backend as a container image. Two targets:
 #
 #   docker build --target app   -t snap-app   backend    api, worker and sweep
 #   docker build --target tools -t snap-tools backend    migrations and the e2e

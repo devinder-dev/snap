@@ -9,9 +9,9 @@ import type { ConfirmChannel, Message, Options } from 'amqplib'
 // also confirms a message that matched no queue (the queue was deleted, the
 // binding removed) and then drops it. Published with `mandatory`, such a
 // message is first sent back to us — a "return" — and only then confirmed.
-// So: a return before the confirm means "not delivered" (SCALING-PLAN.md
-// section 14). The API's live events don't need this: snap.events sends
-// anything unmatched to snap.unrouted instead.
+// So: a return before the confirm means "not delivered". The API's live
+// events don't need this: snap.events sends anything unmatched to
+// snap.unrouted instead.
 
 // The ids of returned messages, per channel. One listener per channel, however
 // many publishes are waiting on it at once.

@@ -37,7 +37,7 @@ export const config = {
     // uses it as the timer queue's TTL: one value, so the two can't drift apart.
     snapTtlMs: positiveInt('SNAP_TTL_MS', 24 * 60 * 60 * 1000),
 
-    // Worker retries (Step 4): wait this long between attempts, give up after this many.
+    // Worker retries: wait this long between attempts, give up after this many.
     snapRetryDelayMs: positiveInt('SNAP_RETRY_DELAY_MS', 30_000),
     snapMaxAttempts: positiveInt('SNAP_MAX_ATTEMPTS', 3),
 }

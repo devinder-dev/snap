@@ -1,4 +1,4 @@
-# CI only (SCALING-PLAN.md Step 9), layered on the laptop stack:
+# CI only, layered on the laptop stack:
 #
 #   COMPOSE_FILE=docker-compose.yml:compose.stack.yml:compose.ci.yml docker compose up -d
 #
