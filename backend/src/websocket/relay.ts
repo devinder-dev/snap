@@ -4,6 +4,7 @@ import { config } from '../config'
 import { watchChannel } from '../queue/connection'
 import { EXCHANGES } from '../queue/topology'
 import { emitEvent } from './controllers'
+import { getWebsocketServer } from './server'
 
 // The relay: how a push reaches a phone that is connected to another API copy.
 //
@@ -20,6 +21,8 @@ import { emitEvent } from './controllers'
 
 // Specific patterns, never '#': '#' would match a typo'd routing key too, and
 // the alternate exchange could never catch one (SCALING-PLAN.md section 5).
+// A typo after a valid prefix ('message.cretaed') still matches here: the
+// relay logs it as unknown and drops it, it doesn't reach snap.unrouted.
 const PATTERNS = ['message.*', 'snap.*', 'friend.*']
 
 // A push that's a minute late is useless (the app refetches when its socket
@@ -72,6 +75,33 @@ export async function startRelay(model: ChannelModel): Promise<void> {
     })
 
     console.log(`✅ Relay listening on ${queue}`)
+
+    // Step 4: A rebuilt relay missed every event while it was down — the old
+    // queue went with the old connection — and the phones that stayed connected
+    // to this copy can't know that. Not on the first start: nobody is connected
+    // yet, and there is nothing to have missed.
+    if (relayStarted) reconnectPhones()
+    relayStarted = true
+}
+
+// True once the relay has started at least once in this process.
+let relayStarted = false
+
+// Closes every phone's connection to this copy, the way a dropped network
+// would ("transport close"), so each one reconnects by itself — maybe to
+// another copy — and the app refetches its lists on every connect. Each
+// connection on its own: engine.close() would also shut the WebSocket server,
+// and no phone could connect again.
+function reconnectPhones(): void {
+    const server = getWebsocketServer()
+    if (!server) return
+
+    const sockets = [...server.of('/').sockets.values()]
+    for (const socket of sockets) socket.conn.close()
+
+    if (sockets.length > 0) {
+        console.log(`🔄 Relay rebuilt: closed ${sockets.length} socket(s), so those phones reconnect and refetch`)
+    }
 }
 
 // One event → the socket.io emits for the people it concerns, if any of them

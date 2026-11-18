@@ -3,6 +3,7 @@ import type { Channel, ChannelModel, ConfirmChannel, ConsumeMessage } from 'amqp
 import { config } from './config'
 import { jobProperties, readAttempt } from './queue/attempts'
 import { closeQueue, connectQueue, watchChannel } from './queue/connection'
+import { publishDelivered } from './queue/delivered'
 import type { EventPayload } from './queue/events'
 import { QUEUES } from './queue/topology'
 import * as services from './services'
@@ -118,30 +119,22 @@ async function onFailure(
     }
 
     // Step 2: Attempts left → a copy waits in snap.retry.wait, whose TTL sends
-    // it back to snap.expire.queue. Ack the original only once RabbitMQ has
-    // confirmed the copy (rule 4); acking first could lose the job for good.
+    // it back to snap.expire.queue. Ack the original only once the copy is
+    // really in that queue (rule 4) — sent through the default exchange, which
+    // routes by queue name — or acking could lose the job for good.
     try {
-        await sendToRetry(publish, msg, attempt + 1)
+        await publishDelivered(publish, '', QUEUES.retryWait, msg.content, jobProperties(msg, attempt + 1))
         console.warn(`⚠️ Snap ${snapId}: attempt ${attempt} of ${config.snapMaxAttempts} failed (${reason}), `
             + `next try in ${config.snapRetryDelayMs / 1000} s`)
         settle(() => channel.ack(msg))
     } catch (publishErr) {
-        // The copy wasn't confirmed, so the original must stay. Park it rather
-        // than requeue it: a requeue would come straight back and fail again.
-        console.error(`❌ Snap ${snapId}: could not schedule a retry, dead-lettered`, publishErr)
+        // The copy didn't make it — refused, or no snap.retry.wait to take it —
+        // so the original must stay. Park it rather than requeue it: a requeue
+        // would come straight back and fail again.
+        const why = publishErr instanceof Error ? publishErr.message : String(publishErr)
+        console.error(`❌ Snap ${snapId}: could not schedule a retry (${why}), dead-lettered`)
         settle(() => channel.nack(msg, false, false))
     }
-}
-
-// Resolves when RabbitMQ confirms it has the copy; rejects if it refuses it or
-// the channel closes first.
-function sendToRetry(publish: ConfirmChannel, msg: ConsumeMessage, attempt: number): Promise<void> {
-    return new Promise((resolve, reject) => {
-        publish.sendToQueue(QUEUES.retryWait, msg.content, jobProperties(msg, attempt), (err) => {
-            if (err) reject(err)
-            else resolve()
-        })
-    })
 }
 
 // Warns when a parking lot holds more than at the last count. The first count

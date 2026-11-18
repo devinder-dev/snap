@@ -96,6 +96,7 @@ export type InboxEntry = {
 export type ExpiredSnap = {
     id: string
     media_key: string | null
+    expires_at: Date
 }
 
 // A chat message with both ends resolved to usernames — ids never leave the

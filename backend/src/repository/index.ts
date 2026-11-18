@@ -232,6 +232,9 @@ export async function claimSnapForRecipient(
           AND sr.snap_id      = ${snapId}
           AND sr.viewed_at IS NULL
           AND s.expires_at > now()
+          -- A photo only once its upload has landed: opening it earlier would
+          -- use up the one view on a snap with no photo.
+          AND (s.type = 'text' OR s.media_key IS NOT NULL)
         RETURNING s.*, sender.username AS sender_username
     `
     return (row as SnapWithSender | undefined) ?? null
@@ -258,6 +261,8 @@ export async function getInboxForUser(username: string): Promise<InboxEntry[]> {
         JOIN users sender ON sender.id = s.sender_id
         WHERE sr.viewed_at IS NULL
           AND s.expires_at > now()
+          -- The same rule as claimSnapForRecipient: a photo appears once uploaded.
+          AND (s.type = 'text' OR s.media_key IS NOT NULL)
         ORDER BY s.created_at DESC
     `
     return rows as InboxEntry[]
@@ -315,14 +320,30 @@ export async function getIncomingFriendRequests(username: string): Promise<Incom
 // Snaps past expires_at, oldest first, a batch at a time. The expiry job
 // deletes the S3 object before the row, so it needs the key while the row
 // still exists — hence a SELECT here rather than DELETE..RETURNING.
-export async function getExpiredSnaps(limit: number): Promise<ExpiredSnap[]> {
-    const rows = await sql`
-        SELECT id, media_key
-        FROM snaps
-        WHERE expires_at <= now()
-        ORDER BY expires_at
-        LIMIT ${limit}
-    `
+//
+// `after` is where the previous batch ended. Paging by (expires_at, id) rather
+// than always taking the oldest means a row whose S3 delete failed stays behind
+// that point, so it can't block the rows after it; the next run retries it.
+export async function getExpiredSnaps(
+    limit: number,
+    after: { expiresAt: Date; id: string } | null = null
+): Promise<ExpiredSnap[]> {
+    const rows = after
+        ? await sql`
+            SELECT id, media_key, expires_at
+            FROM snaps
+            WHERE expires_at <= now()
+              AND (expires_at, id) > (${after.expiresAt}, ${after.id}::bigint)
+            ORDER BY expires_at, id
+            LIMIT ${limit}
+        `
+        : await sql`
+            SELECT id, media_key, expires_at
+            FROM snaps
+            WHERE expires_at <= now()
+            ORDER BY expires_at, id
+            LIMIT ${limit}
+        `
     return rows as ExpiredSnap[]
 }
 
@@ -331,7 +352,7 @@ export async function getExpiredSnaps(limit: number): Promise<ExpiredSnap[]> {
 // section 9, rule 6). Null when the snap isn't due yet or is already gone.
 export async function getExpiredSnapById(id: string): Promise<ExpiredSnap | null> {
     const [row] = await sql`
-        SELECT id, media_key
+        SELECT id, media_key, expires_at
         FROM snaps
         WHERE id = ${id}
           AND expires_at <= now()

@@ -13,5 +13,9 @@
 !scripts
 !db
 
+# Never an env file, not even one inside the folders let in above.
+**/.env
+**/.env.*
+
 # Finder litter inside the folders let in above.
 **/.DS_Store

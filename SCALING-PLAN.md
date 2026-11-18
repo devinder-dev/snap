@@ -1,6 +1,6 @@
 # Snap — scaling plan: several servers and RabbitMQ
 
-Status: **Step 9 done** (2026-11-18), **plan version 4** (2026-11-17). The whole backend runs
+Status: **Step 9b done** (2026-11-18), **plan version 4.1** (2026-11-18). The whole backend runs
 as it will on the server: `docker compose` starts Traefik in front of three api copies, the
 worker, and the migrations before them. Every live push goes through RabbitMQ, so a message
 reaches the phone whichever copy holds its socket; a copy that dies drops out of Traefik, and
@@ -8,7 +8,7 @@ its phones reconnect to another one by themselves. A worker deletes each snap wh
 timer runs out, retries a failed delete, then parks it in `snap.dead.queue`. **GitHub Actions**
 now runs that same stack and the e2e on every push, and on `main` publishes the images to
 ghcr.io (amd64 + arm64, tagged with the commit SHA); CodeQL and Dependabot watch the code and
-the dependencies. Steps 10–12 (public-internet hardening, deploy to one VPS, proof) are not
+the dependencies. Step 9b fixed what an independent code review found (version 4.1). Steps 10–12 (public-internet hardening, deploy to one VPS, proof) are not
 started (Step 8 was dropped). Version 4 runs the copies with **docker
 compose behind Traefik** instead of Kubernetes — section 0 says what changed and why.
 Verified beforehand: `amqplib` 2.2 works under Bun 1.3.14, and every RabbitMQ feature used
@@ -32,6 +32,23 @@ push.
 | 3.1 | 2026-10-17 | Security scans: GitHub's CodeQL + Dependabot in CI instead of Snyk |
 | 3.2 | 2026-10-21 | Local Docker setup: Snap's own Postgres, ports for this laptop only |
 | 4 | 2026-11-17 | **docker compose + Traefik** instead of Kubernetes for Steps 6–12; Step 8 dropped |
+| 4.1 | 2026-11-18 | **Step 9b** added: fixes from an independent code review; more checks for Steps 10–11 |
+
+### Version 4.1 — Step 9b, fixes from a code review (2026-11-18)
+
+**Why:** after Step 9, an independent reviewer read Steps 0–7 with no access to the running
+system. Every claim was checked against the code before acting; five were reproduced on the old
+code first (Step 9b's result). Fixing them before Step 10 keeps the hardening step about the
+public internet, not about bugs that were already there.
+
+| Topic | Before | After | Why |
+|---|---|---|---|
+| Retry copies and replay | Acked the original after a publisher confirm | Acked only once a queue has the copy (`mandatory` + no return) | RabbitMQ also confirms a message that reached no queue — and drops it |
+| A relay rebuilt after a RabbitMQ blip | Nothing told the phones that stayed connected | Their socket connections are closed, so they reconnect and refetch | An open chat silently missed what was sent during the gap |
+| Sweep with failing S3 deletes | Exit 0; stopped at a batch where every delete failed | Exit 1 with counts; pages past the failed rows | cron must see a failure, and one bad batch mustn't block the rest |
+| A photo snap during its upload | Already in the inbox and openable — the one view used up, no photo | Shown and openable only once the photo is attached | A user-visible bug |
+| Rule 1 "at least once" | One promise for everything | A guarantee per hop (section 9) | RabbitMQ's own dead-letter moves are at most once |
+| Steps 10 and 11 | – | More checks from the review (marked there) | Backpressure, readiness, shutdown, production compose, rollout and restore tests |
 
 ### Version 4 — docker compose instead of Kubernetes (2026-11-17)
 
@@ -192,6 +209,7 @@ Kubernetes is shown in another project (Relay). Here the point is the realtime s
 | 7 | Several copies on the laptop: docker compose + Traefik | ✅ 2026-11-17 |
 | 8 | ~~Kubernetes like production~~ | Dropped in version 4 |
 | 9 | CI/CD on every push | ✅ 2026-11-18 |
+| 9b | Fixes from a code review *(added in version 4.1)* | ✅ 2026-11-18 |
 | 10 | Ready for the public internet | ⬜ |
 | 11 | Deploy to one VPS with docker compose | ⬜ |
 | 12 | Proof and presentation | ⬜ |
@@ -435,7 +453,10 @@ Why the realtime queue has a 60 s TTL: a live push that's a minute late is usele
 refetches on reconnect anyway — and it stops a stuck server from piling up messages.
 
 Why bindings are **specific** (`message.*`, not `#`): a `#` rule matches everything, including
-typos, so the alternate exchange would never catch anything.
+typos, so the alternate exchange would never catch anything. The limit of `*`: a typo *after* a
+valid prefix (`message.cretaed`) still matches, so it never reaches `snap.unrouted` — the relay
+logs it as an unknown event and drops it. Exact bindings per event would catch that too, at the
+cost of a binding change for every new event.
 
 ---
 
@@ -541,9 +562,16 @@ refetches.
 | What | Effect | Recovery |
 |---|---|---|
 | HTTP API | Works normally — all data goes to Postgres | – |
-| Live pushes | Paused (publishes are logged and dropped) | App refetches on reconnect |
+| Live pushes | Paused (publishes are logged and dropped) | When a copy's relay is rebuilt, it closes its phones' socket connections, so they reconnect and the app refetches *(Step 9b)* |
 | Snap timers | Not started for snaps sent during the outage | Hourly safety net deletes them |
 | API / worker | Keep retrying the connection (1 s → 30 s backoff) | Re-declare topology and consumers on reconnect |
+
+*Before Step 9b* this table said "app refetches on reconnect" — but the phone's socket goes to
+the api copy, not to RabbitMQ, so a RabbitMQ blip never made it reconnect, and an open chat
+silently missed what was sent during the gap. **Still not covered:** if only *one* copy loses
+RabbitMQ, the events it publishes in that time are dropped for the phones on the *other* copies,
+which don't reconnect. They see those items on their next refetch (reopening a screen or
+reconnecting). Closing that gap would need an outbox (section 15).
 
 ---
 
@@ -565,9 +593,21 @@ is already invisible to users, and the hourly safety net deletes it once the cau
 
 ## 9. Reliability rules
 
-1. **At least once, not exactly once.** A message can arrive twice, so every consumer must be
-   safe to run twice (*idempotent*). Deleting a snap twice deletes nothing the second time;
-   pushing a message twice is filtered by id in the app.
+1. **At least once, not exactly once — and only where we can prove it.** A message can arrive
+   twice, so every consumer must be safe to run twice (*idempotent*). Deleting a snap twice
+   deletes nothing the second time; pushing a message twice is filtered by id in the app.
+   The guarantee per hop *(made precise in Step 9b)*:
+
+   | Hop | Guarantee |
+   |---|---|
+   | Worker → `snap.retry.wait`, dead-letters replay → `snap.expire` | **At least once.** `mandatory` + publisher confirm: the original is acked only once a queue has the copy (`queue/delivered.ts`) |
+   | Queue → consumer (relay, worker) | **At least once.** Ack after the work; an unacked message is redelivered |
+   | RabbitMQ's own dead-letter moves (TTL → `snap.expire`, reject → `snap.dlx`) | **At most once.** RabbitMQ doesn't confirm them for classic queues: if the target queue is missing at that moment, the message is gone |
+   | API → `snap.events` (live pushes) | **Best effort.** Dropped and logged while RabbitMQ is down (7.6) |
+
+   So the promise "every expired snap is deleted" rests on **Postgres and the sweep**, not on
+   RabbitMQ: the timer makes deletion *timely*, the hourly sweep makes it *certain* (at most an
+   hour late).
 2. **Postgres first, then publish.** An event is only published after the write is committed.
 3. **Ack after the work is done.** If the worker crashes mid-job, the unacked message is
    redelivered.
@@ -973,9 +1013,11 @@ moment after Docker reports it healthy). A socket held open through Traefik for 
 100 KB/s took **88 s** and got 201 — the 60 s default would have cut it. `run --rm sweep`
 succeeded. The first attempt hit Docker Hub's anonymous limit (100 requests an hour, used up
 by checking image tags); logged in to Docker Hub, it pulled fine (section 14). Traefik logs two
-start-up warnings (encoded characters in paths, `aliasHeadersStrategy`), which concern backends
-that turn header names into variables (PHP, CGI) — to review in Step 10. Left for Devinder: the
-real phone check.
+start-up warnings — to review in Step 11: `aliasHeadersStrategy` (headers like `X_Auth_User`
+that some backends read as `X-Auth-User`; it matters for PHP or CGI, not for Fastify) and
+encoded characters in paths (whether Traefik and the backend read an encoded path the same
+way). *Corrected 2026-11-18: this note first treated both as the same header issue.* Left for
+Devinder: the real phone check.
 
 ### Step 8 — ~~Kubernetes like production~~ (dropped in version 4)
 
@@ -1041,6 +1083,46 @@ protection were already on. First findings, for Step 10: CodeQL `js/missing-rate
 Dependabot's first pull requests: Traefik v3.7.15 → v3.7.19, and 8 backend updates (amqplib
 2.2.0 → 2.3.1 among them), both green in CI.
 
+### Step 9b — Fixes from a code review
+
+*Added in version 4.1 (section 0).* Each fix starts with a test that shows the problem on the
+old code.
+
+- [x] `queue/delivered.ts`: `publishDelivered()` — publish with `mandatory`, and treat a
+      returned message as a failure even when it's confirmed. The worker's retry copies and
+      `dead-letters replay` use it.
+- [x] `websocket/relay.ts`: when the relay is rebuilt (not on its first start), close the local
+      phones' socket connections one by one, so they reconnect and the app refetches.
+- [x] `queue/connection.ts`: `setup()` watches for a close itself and fails the attempt if the
+      connection closed before it finished (amqplib only starts watching after `setup()`).
+- [x] Sweep: page by `(expires_at, id)` past failed rows; return deleted and failed counts;
+      `scripts/sweep.ts` exits 1 when anything failed.
+- [x] Photo snaps appear in the inbox and can be opened only once their photo is attached; a
+      failed attach removes the uploaded object.
+- [x] `.dockerignore`: no `.env` file even inside `src/`, `scripts/`, `db/`.
+- [x] Docs: rule 1 per hop, 7.6, the `*` binding limit, the README's push description.
+
+✅ **Done when:** the same test shows each problem on the old code and its fix on the new;
+the e2e passes; CI is green.
+
+**Result (2026-11-18):** one test script ran twice against the same RabbitMQ — on the old code
+(a clone of `main`) and on the fixed code:
+
+| Finding | Old code | Fixed code |
+|---|---|---|
+| Retry into a deleted `snap.retry.wait` | attempt 1 failed, the job was gone (dead queue 0) | "could not schedule a retry (no queue took it)", parked — dead queue 1 |
+| Replay with the `snap.expire.queue` binding removed | "✅ Replayed 1 job(s)", the job was gone | exit 1, "Replay stopped… the rest stay parked", dead queue 1 |
+| RabbitMQ connection force-closed, phone stays connected | the phone never reconnected (40 s) | `transport close`, reconnected 1.5 s later — the app refetches |
+| Sweep with a failing S3 key, one text + one photo snap expired | exit 0, "✅ Sweep done: 1 deleted" | exit 1, "1 deleted, 1 could not be" |
+| Photo snap whose upload hasn't finished | in the inbox; opening it used the one view with no photo | not in the inbox, 404; after the attach: listed, opens with its photo |
+
+The `setup()` close guard has no test of its own: the gap is too narrow to trigger on demand
+(amqplib 2.4.0 still starts watching only after `setup()`), so it was checked only for not
+breaking a normal reconnect. Before the fixes, Dependabot's backend group and amqplib **2.4.0**
+(two security fixes beyond the group's 2.3.1) passed every RabbitMQ failure path by hand: the
+wrong-password and 406 exits, a RabbitMQ restart with the relay and worker rebuilt, SIGTERM,
+retries → dead letter → replay. After the fixes: e2e 67 of 67, tsc and actionlint clean.
+
 ### Step 10 — Ready for the public internet
 
 *Unchanged in version 3 apart from its number (was Step 8); version 4 only changes "pod" to
@@ -1060,6 +1142,14 @@ Dependabot's first pull requests: Traefik v3.7.15 → v3.7.19, and 8 backend upd
       find.
 - [ ] `bun run seed:demo`: two demo users who are already friends, so a visitor can try chat in
       a minute.
+- [ ] *From the review (version 4.1):* watch RabbitMQ's `blocked`/`unblocked` signal and cap
+      unconfirmed publishes, so a broker alarm can't grow the api's memory; a deadline on worker
+      jobs; one shutdown promise per process that stops recovery first; `/health/ready` also
+      reports whether this copy's relay is running, and logs a warning when RabbitMQ stays
+      unreachable (a wrong vhost or TLS setting retries forever today); cap a photo link's
+      lifetime at the snap's remaining life; e2e checks with a definite "object gone"
+      (`HEAD` through the S3 client, not "not 200"); a CI test for a missing retry route;
+      Fastify trusts client-IP headers only from Traefik (for the rate limit).
 
 ✅ **Done when:** the e2e passes, the 6th wrong login in a minute against one copy gets a 429,
 and the logs show one message's `messageId` on two different copies.
@@ -1099,6 +1189,12 @@ Prices change; compare them when we get here.
       key can only run the deploy, and passes the new image tag.
 - [ ] cron on the server: the sweep hourly (`docker compose run --rm sweep`), the backup daily.
 - [ ] `docs/deployment.md`. Point the app at the `https://` URL.
+- [ ] *From the review (version 4.1):* `compose.prod.yml` must *remove* what the laptop stack
+      adds — compose **appends** port lists, so use `!reset` (or don't layer `compose.stack.yml`);
+      no Traefik dashboard; no laptop passwords in `environment`. Docker socket only through a
+      socket proxy (`:ro` doesn't limit the API). Decide Traefik's `aliasHeadersStrategy` and
+      encoded-path settings. A tested rollout and rollback with old and new copies serving
+      together; a restore test that also checks the photos.
 
 ✅ **Done when:** the e2e passes against the public URL; killing an api copy there doesn't break
 a live chat; the e2e in a loop during a deploy from CI has zero failed checks; last night's
@@ -1239,6 +1335,10 @@ afterwards.
   Step 7 a tag check printed "not found" for a Docker Hub 429, so Traefik v3.7.15 was taken for
   the newest version; Dependabot then offered v3.7.19. Check versions in the docs or with
   Dependabot, not by probing many tags.
+- **RabbitMQ confirms a message that reached no queue** (Step 9b). A publisher confirm means
+  "RabbitMQ handled it", not "a queue has it": a publish to a deleted queue, or to an exchange
+  with no binding, is confirmed and dropped. Publish with `mandatory` and treat a returned
+  message as a failure (`queue/delivered.ts`).
 - **CI green doesn't cover reconnects, retries or dead letters.** The e2e tests the happy path
   across copies; the RabbitMQ failure paths (Steps 2–5) were tested by hand. A Dependabot bump
   of `amqplib` or `socket.io` needs those manual checks too, or a test for them (Step 9).
@@ -1258,6 +1358,9 @@ afterwards.
   pushes, not for data).
 - Routing pushes only to the copy a user is on, instead of every copy (matters with many copies).
 - Prometheus + Grafana: queue depth, publish failures, copies over time — Step 10 only adds logs.
+- An outbox table for events (written in the same transaction as the data, published by a
+  separate loop), so a copy that loses RabbitMQ doesn't drop the pushes for the other copies
+  (7.6). Not needed while a missed push only means a refetch.
 - Secrets from a vault instead of a `.env` file on the server.
 - PgBouncer if the number of copies grows.
 - Rate limits shared across copies (in Postgres or Redis) instead of per copy.

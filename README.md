@@ -24,8 +24,9 @@ progress, **Docker · Traefik** to run the backend as three copies behind one ad
   The sender is told if you screenshot it. After 24 hours the photo and the row are deleted.
 - **Chat** — one-to-one messages with paged history and a conversation list.
 - **Live pushes** — new snaps, messages, friend requests and screenshots arrive over a
-  WebSocket. The socket only *announces*; all data comes over HTTP, so a missed push is never
-  lost data — the app refetches whenever it reconnects.
+  WebSocket. Every write goes over HTTP and is saved in PostgreSQL first; a push only tells the
+  phone about it (a chat message carries its text, a snap only its id). So a missed push is
+  never lost data — the app refetches whenever it reconnects.
 
 ## Where it started — one server
 

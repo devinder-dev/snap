@@ -12,6 +12,7 @@
 import { connect, type ConfirmChannel } from 'amqplib'
 import { config } from '../src/config'
 import { jobProperties, readAttempt } from '../src/queue/attempts'
+import { publishDelivered } from '../src/queue/delivered'
 import { EXCHANGES, QUEUES } from '../src/queue/topology'
 
 const COMMANDS = ['list', 'replay', 'purge']
@@ -74,8 +75,8 @@ async function list(channel: ConfirmChannel, count: number): Promise<void> {
 }
 
 // Each job goes back into snap.expire, exactly as the timer sends it, as
-// attempt 1. Publish, wait for RabbitMQ's confirm, then ack the parked copy: if
-// anything fails in between, the parked copy is still there.
+// attempt 1. Publish, wait until snap.expire.queue really has it, then ack the
+// parked copy: if anything fails in between, the parked copy is still there.
 //
 // Only the `count` jobs that were parked when it started: a job that fails
 // again at once and comes straight back isn't replayed in a loop.
@@ -86,9 +87,18 @@ async function replay(channel: ConfirmChannel, count: number): Promise<void> {
         const msg = await channel.get(QUEUES.dead, { noAck: false })
         if (!msg) break
 
-        // snap.expire is a fanout exchange, so the routing key doesn't matter.
-        channel.publish(EXCHANGES.expire, '', msg.content, jobProperties(msg, 1))
-        await channel.waitForConfirms()
+        try {
+            // snap.expire is a fanout exchange, so the routing key doesn't matter.
+            await publishDelivered(channel, EXCHANGES.expire, '', msg.content, jobProperties(msg, 1))
+        } catch (err) {
+            // Not acked, so closing the channel puts this job back where it was.
+            const why = err instanceof Error ? err.message : String(err)
+            console.error(`❌ Replay stopped after ${replayed} job(s): ${why}. `
+                + `The rest stay parked. Is ${QUEUES.expire} bound to ${EXCHANGES.expire}?`)
+            process.exitCode = 1
+            return
+        }
+
         channel.ack(msg)
         replayed++
     }

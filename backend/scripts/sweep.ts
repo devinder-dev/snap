@@ -13,10 +13,18 @@ import * as services from '../src/services'
 
 try {
     // Step 1: Sweep.
-    const deleted = await services.deleteExpiredSnaps()
-    console.log(`✅ Sweep done: ${deleted} expired snap(s) deleted`)
+    const { deleted, failed } = await services.deleteExpiredSnaps()
+
+    // Step 2: Any failure exits non-zero, so cron (and you) can see it. The
+    // rows that failed keep their keys, and the next run tries them again.
+    if (failed > 0) {
+        console.error(`❌ Sweep: ${deleted} expired snap(s) deleted, ${failed} could not be — `
+            + 'their photos are still in S3; the rows stay for the next run')
+        process.exitCode = 1
+    } else {
+        console.log(`✅ Sweep done: ${deleted} expired snap(s) deleted`)
+    }
 } catch (error) {
-    // Step 2: A failed sweep exits non-zero, so cron (and you) can see it.
     console.error('❌ Sweep failed', error)
     process.exitCode = 1
 } finally {

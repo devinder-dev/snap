@@ -163,7 +163,14 @@ export async function sendSnap(input: SendSnapInput): Promise<SendSnapResponse> 
 
         await s3.uploadFile(key, input.image, input.mimetype)
 
-        await repository.setSnapMedia(createdSnap.id, key, input.mimetype)
+        // Null means the row vanished (or got media) during the upload. Then no
+        // row knows this key and nothing would ever delete the object: remove
+        // it now. (The bucket's 2-day lifecycle rule is only the last resort.)
+        const attached = await repository.setSnapMedia(createdSnap.id, key, input.mimetype)
+        if (!attached) {
+            await s3.deleteFile(key).catch(() => {})
+            throw new Error(`Snap ${createdSnap.id} was gone before its photo was attached`)
+        }
     }
 
     // Notify last, once the snap is durable. A recipient who is offline finds it
@@ -272,11 +279,18 @@ const EXPIRY_BATCH_SIZE = 100
 //
 // Safe to run on several instances at once: S3 deletes are idempotent and the
 // row delete re-checks expires_at, so a race just deletes nothing twice.
-export async function deleteExpiredSnaps(): Promise<number> {
-    let total = 0
+//
+// Returns how many were deleted and how many failed, so the sweep can tell
+// cron the truth: a run with failures is not a success.
+export type SweepResult = { deleted: number; failed: number }
+
+export async function deleteExpiredSnaps(): Promise<SweepResult> {
+    let deleted = 0
+    let failed = 0
+    let after: { expiresAt: Date; id: string } | null = null
 
     while (true) {
-        const expired = await repository.getExpiredSnaps(EXPIRY_BATCH_SIZE)
+        const expired = await repository.getExpiredSnaps(EXPIRY_BATCH_SIZE, after)
         if (expired.length === 0) break
 
         const results = await Promise.allSettled(
@@ -292,21 +306,23 @@ export async function deleteExpiredSnaps(): Promise<number> {
 
         for (const result of results) {
             if (result.status === 'rejected') {
+                failed++
                 console.error('Could not delete expired snap media', result.reason)
             }
         }
 
-        total += await repository.deleteSnaps(deletable)
-
-        // Every S3 delete in this batch failed. Stop, or the loop would fetch
-        // the same batch forever; the next scheduled run retries.
-        if (deletable.length === 0) break
+        deleted += await repository.deleteSnaps(deletable)
 
         // A short batch means that was the last of them.
         if (expired.length < EXPIRY_BATCH_SIZE) break
+
+        // The next batch starts after this one's last row, so rows that failed
+        // here are skipped for the rest of this run instead of coming back.
+        const last = expired[expired.length - 1]!
+        after = { expiresAt: last.expires_at, id: last.id }
     }
 
-    return total
+    return { deleted, failed }
 }
 
 const MAX_MESSAGE_LENGTH = 2000
