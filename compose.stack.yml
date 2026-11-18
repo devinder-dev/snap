@@ -14,8 +14,14 @@
 # What every backend container shares: backend/.env (S3 and JWT settings),
 # except that Postgres and RabbitMQ are reached by their service names here.
 # These are the local-only passwords already set in docker-compose.yml.
+#
+# The .env file is optional because CI has none: compose.ci.yml sets those
+# values instead. On the laptop a missing .env still fails loudly — the api
+# stops at startup with "Set S3_BUCKET!".
 x-backend: &backend
-  env_file: backend/.env
+  env_file:
+    - path: backend/.env
+      required: false
   environment:
     DATABASE_URL: postgresql://postgres:postgres@postgres:5432/snap
     RABBITMQ_URL: amqp://snap:snap@rabbitmq:5672
@@ -88,6 +94,9 @@ services:
       - traefik.http.routers.snap.rule=PathPrefix(`/`)
       - traefik.http.routers.snap.entrypoints=web
       - traefik.http.services.snap.loadbalancer.server.port=3000
+      # The network Traefik reaches the copies on: <project>_default, so the
+      # stack also works under another project name (a CI rehearsal).
+      - traefik.docker.network=${COMPOSE_PROJECT_NAME:-snap}_default
 
   worker:
     <<: [*backend, *app-image]
@@ -110,7 +119,8 @@ services:
         condition: service_healthy
 
   # On demand only: `docker compose run --rm e2e`. Talks to two copies by
-  # name, so every push between Anna and Ben has to cross RabbitMQ.
+  # name, so every push between Anna and Ben has to cross RabbitMQ. The names
+  # are <project>-api-<n>: snap-api-1 normally.
   e2e:
     <<: [*backend, *tools-image]
     profiles: [tools]
@@ -119,8 +129,8 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/snap
       RABBITMQ_URL: amqp://snap:snap@rabbitmq:5672
-      E2E_BASE_URL: http://snap-api-1:3000
-      E2E_OTHER_URL: http://snap-api-2:3000
+      E2E_BASE_URL: http://${COMPOSE_PROJECT_NAME:-snap}-api-1:3000
+      E2E_OTHER_URL: http://${COMPOSE_PROJECT_NAME:-snap}-api-2:3000
     depends_on:
       api:
         condition: service_healthy

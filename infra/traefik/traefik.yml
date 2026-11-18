@@ -17,10 +17,9 @@ entryPoints:
 providers:
   docker:
     # Only containers labelled traefik.enable=true get traffic, never
-    # Postgres, RabbitMQ or anything else that happens to run.
+    # Postgres, RabbitMQ or anything else that happens to run. Which network
+    # to reach them on is a label on the api (compose.stack.yml).
     exposedByDefault: false
-    # The compose network where Traefik reaches the api copies.
-    network: snap_default
 
 # The dashboard: which routers and copies are live right now. Port 8080 inside
 # the container, 127.0.0.1:8081 on the laptop. "insecure" means no login, which

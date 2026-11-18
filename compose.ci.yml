@@ -1,0 +1,61 @@
+# CI only (SCALING-PLAN.md Step 9), layered on the laptop stack:
+#
+#   COMPOSE_FILE=docker-compose.yml:compose.stack.yml:compose.ci.yml docker compose up -d
+#
+# What changes from the laptop:
+#   - S3Mock, a stand-in for S3, instead of AWS: CI never holds real keys
+#   - throwaway settings instead of backend/.env (nothing here is a real secret)
+#   - nothing is published on the machine's ports: every test runs inside the
+#     compose network, where the copies, Traefik and S3Mock are reached by name
+
+# What backend/.env holds on the laptop, with values that only work in CI.
+x-ci-settings: &ci-settings
+  JWT_SECRET_KEY: ci-only-not-a-secret
+  S3_BUCKET: snap-ci
+  S3_REGION: us-east-1
+  S3_ACCESS_KEY_ID: ci-dummy
+  S3_SECRET_ACCESS_KEY: ci-dummy
+  # Presigned links carry this host name, which only resolves on the compose
+  # network — one reason the e2e runs as a container there.
+  S3_ENDPOINT: http://s3mock:9090
+
+services:
+  # Accepts any key and never checks signatures: it tests our S3 calls, not
+  # AWS's security. Path-style URLs only (bucket in the path), which is what
+  # Bun's S3 client sends with a custom endpoint.
+  s3mock:
+    image: adobe/s3mock:5.2.3
+    environment:
+      COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: snap-ci
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/favicon.ico"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  postgres:
+    ports: !reset []
+
+  rabbitmq:
+    ports: !reset []
+
+  traefik:
+    ports: !reset []
+
+  migrate:
+    environment: *ci-settings
+
+  api:
+    environment: *ci-settings
+    depends_on:
+      s3mock:
+        condition: service_healthy
+
+  worker:
+    environment: *ci-settings
+
+  sweep:
+    environment: *ci-settings
+
+  e2e:
+    environment: *ci-settings

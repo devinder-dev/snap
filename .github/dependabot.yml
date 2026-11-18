@@ -1,0 +1,51 @@
+# Dependabot (SCALING-PLAN.md Step 9): pull requests that update dependencies,
+# each tested by CI before anyone merges it. Security fixes come on their own
+# as soon as a hole is known; the version updates below come once a week.
+
+version: 2
+updates:
+  # The backend's packages. Minor and patch updates arrive together in one
+  # pull request; a major version gets its own, because it can break things.
+  - package-ecosystem: bun
+    directory: /backend
+    schedule:
+      interval: weekly
+    groups:
+      backend-minor-and-patch:
+        update-types: [minor, patch]
+
+  # The app: security fixes only. Expo SDK 54 pins compatible versions of
+  # react-native and the expo-* packages together, so they are upgraded on
+  # purpose with `bunx expo install --fix`, not one by one. A limit of 0 turns
+  # off the version updates but keeps the security fixes.
+  - package-ecosystem: bun
+    directory: /snap
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+
+  # The Dockerfile's base image (oven/bun).
+  - package-ecosystem: docker
+    directory: /backend
+    schedule:
+      interval: weekly
+
+  # The images in the compose files (postgres, rabbitmq, traefik, s3mock).
+  # Never a new major Postgres: its data files don't work across majors, so
+  # that upgrade needs a dump and restore, done by hand.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: postgres
+        update-types: [version-update:semver-major]
+
+  # The actions in .github/workflows, pinned by SHA.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

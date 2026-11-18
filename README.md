@@ -1,5 +1,8 @@
 # Snap
 
+[![CI](https://github.com/devinder-dev/snap/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/devinder-dev/snap/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/devinder-dev/snap/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/devinder-dev/snap/actions/workflows/codeql.yml)
+
 A Snapchat-style app: send photo and text snaps that can be viewed once and disappear after
 24 hours, chat with friends, and get every update live.
 
