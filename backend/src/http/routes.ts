@@ -3,14 +3,6 @@ import * as controllers from './controllers'
 
 async function routes(httpServer: FastifyInstance) {
 
-    // Liveness: "is this process up". Docker and the host call it every few
-    // seconds, so it must never touch Postgres — see controllers.health.
-    httpServer.route({
-        method: 'GET',
-        url: '/health',
-        handler: controllers.health
-    })
-
     // At most 20 new accounts per client IP a minute: room for a few typos and
     // the e2e's seven, not for a script creating thousands.
     httpServer.route({

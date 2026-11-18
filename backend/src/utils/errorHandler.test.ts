@@ -1,7 +1,6 @@
 import multipart from "@fastify/multipart";
-import { expect, spyOn, test } from "bun:test";
+import { expect, test } from "bun:test";
 import fastify from "fastify";
-import { InternalError } from "../errors";
 import addGlobalErrorHandler from "./errorHandler";
 
 test("keeps parser and upload failures in the public 4xx response format", async () => {
@@ -38,9 +37,11 @@ test("keeps parser and upload failures in the public 4xx response format", async
 });
 
 test("logs the original error and keeps the public 500 generic", async () => {
-    const app = fastify();
+    const lines: string[] = [];
+    const app = fastify({
+        logger: { stream: { write: (line: string) => lines.push(line) } },
+    });
     const cause = new Error("private test cause");
-    const log = spyOn(console, "log").mockImplementation(() => {});
     addGlobalErrorHandler(app);
     app.get("/failure", async () => { throw cause; });
 
@@ -48,11 +49,10 @@ test("logs the original error and keeps the public 500 generic", async () => {
         const response = await app.inject({ method: "GET", url: "/failure" });
         expect(response.statusCode).toBe(500);
         expect(response.json()).toEqual({ success: false, code: 500, message: "Unknown error" });
-        const logged = log.mock.calls.find(([message]) => message === "Unknown error occurred")?.[1];
-        expect(logged).toBeInstanceOf(InternalError);
-        expect((logged as InternalError).full_error).toBe(cause);
+        const logged = lines.map((line) => JSON.parse(line)).find((entry) => entry.msg === "❌ Unknown error occurred");
+        expect(logged?.err?.message).toBe(cause.message);
+        expect(logged?.err?.stack).toBe(cause.stack);
     } finally {
-        log.mockRestore();
         await app.close();
     }
 });

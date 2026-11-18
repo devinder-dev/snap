@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import type { ChannelModel, ConsumeMessage } from 'amqplib'
+import type { Channel, ChannelModel, ConsumeMessage } from 'amqplib'
 import { config } from '../config'
 import { watchChannel } from '../queue/connection'
 import { EXCHANGES } from '../queue/topology'
 import { emitEvent } from './controllers'
 import { getWebsocketServer } from './server'
+import { log } from '../utils/logger'
 
 // The relay: how a push reaches a phone that is connected to another API copy.
 //
@@ -31,6 +32,11 @@ const PUSH_TTL_MS = 60_000
 
 // RabbitMQ sends this copy at most this many messages it hasn't acked yet.
 const PREFETCH = 100
+let relayChannel: Channel | null = null
+
+export function relayReady(): boolean {
+    return relayChannel !== null
+}
 
 // Runs on every (re)connect, from setup() in queue/connection.ts.
 export async function startRelay(model: ChannelModel): Promise<void> {
@@ -38,6 +44,12 @@ export async function startRelay(model: ChannelModel): Promise<void> {
     // publish channel shouldn't share one with a consumer.
     const channel = await model.createChannel()
     watchChannel(model, channel, 'relay')
+    let inactive = false
+    const stopRelay = () => {
+        inactive = true
+        if (relayChannel === channel) relayChannel = null
+    }
+    channel.once('close', stopRelay)
 
     // Step 2: This copy's queue. Exclusive: it belongs to this connection, and
     // RabbitMQ deletes it the moment the connection closes, so a crashed pod
@@ -63,7 +75,8 @@ export async function startRelay(model: ChannelModel): Promise<void> {
         // that stopped quietly would mean no pushes on this copy. So close the
         // connection, and recovery builds a fresh queue.
         if (!msg) {
-            console.warn(`⚠️ Relay queue ${queue} was cancelled, reconnecting`)
+            stopRelay()
+            log.warn({ queue }, '⚠️ Relay consumer cancelled, reconnecting')
             model.close().catch(() => {})
             return
         }
@@ -74,7 +87,9 @@ export async function startRelay(model: ChannelModel): Promise<void> {
         channel.ack(msg)
     })
 
-    console.log(`✅ Relay listening on ${queue}`)
+    if (inactive) throw new Error('Relay closed during setup')
+    relayChannel = channel
+    log.info({ queue }, '✅ Relay listening')
 }
 
 // After every relay start (index.ts calls this once RabbitMQ has accepted the
@@ -97,24 +112,27 @@ export function reconnectPhones(): void {
     for (const socket of sockets) socket.conn.close()
 
     if (sockets.length > 0) {
-        console.log(`🔄 Relay rebuilt: closed ${sockets.length} socket(s), so those phones reconnect and refetch`)
+        log.info({ sockets: sockets.length }, '🔄 Relay rebuilt, reconnecting local phones')
     }
 }
 
 // One event → the socket.io emits for the people it concerns, if any of them
 // are connected to this copy.
 function relay(msg: ConsumeMessage): void {
-    const key = msg.fields.routingKey
+    const event = { routingKey: msg.fields.routingKey, messageId: msg.properties.messageId, publisher: msg.properties.appId }
 
     try {
         const payload: unknown = JSON.parse(msg.content.toString())
 
         // During a rolling update an older copy can receive an event that only
         // the newer version knows.
-        if (!emitEvent(key, payload)) {
-            console.warn(`⚠️ Relay: no push defined for ${key}, skipped`)
+        if (!emitEvent(event.routingKey, payload)) {
+            log.warn(event, '⚠️ Relay skipped unknown event')
+            return
         }
-    } catch (err) {
-        console.error(`❌ Relay could not push ${key}`, err)
+        log.info(event, 'Relayed event')
+    } catch {
+        // Parser errors may include fragments of the event body.
+        log.error(event, '❌ Relay could not push event')
     }
 }

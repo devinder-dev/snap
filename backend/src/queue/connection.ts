@@ -1,6 +1,7 @@
 import { connect, type Channel, type ChannelModel, type ConfirmChannel, type RecoveringChannelModel } from 'amqplib'
 import { config } from '../config'
 import { declareTopology } from './topology'
+import { log } from '../utils/logger'
 
 // One connection to RabbitMQ per process, kept alive by amqplib's built-in
 // recovery. When the connection drops, amqplib reconnects on its own: 1 s, 2 s,
@@ -27,6 +28,29 @@ type AmqpError = Error & { code?: string | number }
 let connection: RecoveringChannelModel | null = null
 let publishChannel: ConfirmChannel | null = null
 let stopping = false
+let connected = false
+const OUTAGE_WARNING_MS = 2 * 60_000
+let outageTimer: ReturnType<typeof setTimeout> | undefined
+let outageWarned = false
+
+export function rabbitmqReady(): boolean {
+    return connected && publishChannel !== null
+}
+
+function watchOutage(): void {
+    if (outageTimer || outageWarned || stopping) return
+    outageTimer = setTimeout(() => {
+        outageTimer = undefined
+        outageWarned = true
+        log.warn({ outageMs: OUTAGE_WARNING_MS }, '⚠️ RabbitMQ has not been ready for two minutes')
+    }, OUTAGE_WARNING_MS).unref()
+}
+
+function clearOutage(): void {
+    clearTimeout(outageTimer)
+    outageTimer = undefined
+    outageWarned = false
+}
 
 // The channel to publish on, or null while there's no working connection.
 export function getPublishChannel(): ConfirmChannel | null {
@@ -52,19 +76,25 @@ export async function connectQueue(clientName: string, onConnect?: OnConnect, on
         },
     })
 
+    watchOutage()
     connection.on('connect', () => {
-        console.log('RabbitMQ connected, topology declared')
+        if (stopping || !publishChannel) return
+        connected = true
+        clearOutage()
+        log.info('✅ RabbitMQ connected, topology declared')
         onReady?.()
     })
 
     connection.on('disconnect', (err: AmqpError) => {
-        console.warn(`RabbitMQ disconnected: ${describe(err)}`)
+        connected = false
+        watchOutage()
+        log.warn({ reason: describe(err) }, '⚠️ RabbitMQ disconnected')
     })
 
     connection.on('connect-failed', onConnectFailed)
 
     connection.on('reconnect-scheduled', ({ attempt, delay }) => {
-        console.warn(`RabbitMQ: retry ${attempt} in ${(delay / 1000).toFixed(1)} s`)
+        log.info({ attempt, delayMs: delay }, 'RabbitMQ reconnect scheduled')
     })
 
     // Recovery passes connection errors on here. Without a listener they would
@@ -86,7 +116,7 @@ export function createSetup(onConnect?: OnConnect): (model: ChannelModel) => Pro
         //     and amqplib connects again.
         let closedDuringSetup = false
         const onClose = () => { closedDuringSetup = true }
-        const onError = (err: AmqpError) => { console.warn(`⚠️ RabbitMQ error during setup: ${describe(err)}`) }
+        const onError = (err: AmqpError) => { log.warn({ reason: describe(err) }, '⚠️ RabbitMQ error during setup') }
         model.once('close', onClose)
         model.on('error', onError)
 
@@ -131,13 +161,13 @@ function onConnectFailed(err: AmqpError): void {
     const setupMistake = err.code === 406 || err.message.includes('ACCESS-REFUSED')
 
     if (setupMistake) {
-        console.error(`❌ RabbitMQ setup mistake, stopping: ${describe(err)}`)
+        log.error({ reason: describe(err) }, '❌ RabbitMQ setup mistake, stopping')
         process.exit(1)
     }
 
     // Step 2: Anything else is the network or RabbitMQ being down: log the
     // reason and return. amqplib retries, and 'reconnect-scheduled' logs when.
-    console.warn(`⚠️ RabbitMQ connect failed: ${describe(err)}`)
+    log.warn({ reason: describe(err) }, '⚠️ RabbitMQ connect failed')
 }
 
 // Every channel gets this, the publish channel and each consumer's.
@@ -150,7 +180,7 @@ function onConnectFailed(err: AmqpError): void {
 // gone this is a no-op.
 export function watchChannel(model: ChannelModel, channel: Channel, name: string): void {
     channel.on('error', (err: AmqpError) => {
-        console.warn(`⚠️ RabbitMQ ${name} channel error: ${describe(err)}`)
+        log.warn({ channel: name, reason: describe(err) }, '⚠️ RabbitMQ channel error')
     })
 
     channel.on('close', () => {
@@ -161,6 +191,8 @@ export function watchChannel(model: ChannelModel, channel: Channel, name: string
 // Stops recovery and closes the connection; its channels go with it.
 export async function closeQueue(): Promise<void> {
     stopping = true
+    connected = false
+    clearOutage()
     publishChannel = null
     await connection?.close()
 }

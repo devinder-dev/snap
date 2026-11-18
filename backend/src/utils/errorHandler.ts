@@ -3,7 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { BaseError, InternalError } from "../errors";
 
 function addGlobalErrorHandler(httpServer: FastifyInstance) {
-    httpServer.setErrorHandler((error, _request, reply) => {
+    httpServer.setErrorHandler((error, request, reply) => {
         if (error instanceof BaseError) {
             return reply.status(error.statusCode).send(error.toPublicError());
         }
@@ -21,7 +21,7 @@ function addGlobalErrorHandler(httpServer: FastifyInstance) {
         }
 
         const unknownError = new InternalError("Unknown error", error);
-        console.log("Unknown error occurred", unknownError);
+        request.log.error({ err: unknownError.full_error }, "❌ Unknown error occurred");
         return reply.status(unknownError.statusCode).send(unknownError.toPublicError());
     });
 }

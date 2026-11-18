@@ -20,7 +20,7 @@ async function websocket(httpServer: FastifyInstance) {
 
     setWebsocketServer(websocketServer);
 
-    console.log("Websocket initialized!");
+    httpServer.log.info("✅ WebSocket initialized");
 
     // Identity comes from the JWT and nowhere else. If the server trusted a
     // username out of an event payload, any client could claim to be anyone.
@@ -54,15 +54,13 @@ async function websocket(httpServer: FastifyInstance) {
         // removes each socket from it on disconnect.
         socket.join(userRoom(socket.data.username));
 
-        console.log(`Websocket connected: ${socket.data.username}`);
+        httpServer.log.debug("WebSocket connected");
 
         // No inbound event handlers: the socket is push-only and every write
         // goes over HTTP.
 
         socket.on("disconnect", (reason) => {
-            console.log(
-                `Websocket disconnected: ${socket.data.username} (${reason})`,
-            );
+            httpServer.log.debug({ reason }, "WebSocket disconnected");
         });
     });
 

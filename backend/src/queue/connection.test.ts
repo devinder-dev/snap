@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
-import { describe, expect, test } from 'bun:test'
-import type { ChannelModel } from 'amqplib'
+import { describe, expect, spyOn, test } from 'bun:test'
+import type { ChannelModel, ConsumeMessage, MessageProperties } from 'amqplib'
+import { log } from '../utils/logger'
 
 // Unit tests for the setup that runs on every fresh RabbitMQ connection
 // (`bun test`). A fake connection makes the rare moments happen on demand:
@@ -72,4 +73,55 @@ describe('setup on a fresh connection', () => {
         expect(model.listenerCount('error')).toBe(0)
         expect(model.listenerCount('close')).toBe(0)
     })
+})
+
+test('publisher and relay log the same event ID and cancellation clears relay readiness', async () => {
+    const { publishEvent } = await import('./publish')
+    const { relayReady, startRelay } = await import('../websocket/relay')
+    const { model, answer } = fakeConnection()
+    const channel = fakeChannel()
+    const relayChannel = fakeChannel()
+    let deliver!: (message: ConsumeMessage | null) => void
+    let sent!: ConsumeMessage
+    const close = spyOn(model, 'close')
+    const info = spyOn(log, 'info').mockImplementation(() => {})
+
+    relayChannel.prefetch = async () => {}
+    relayChannel.ack = () => {}
+    relayChannel.consume = async (_queue: string, callback: typeof deliver) => { deliver = callback }
+    Object.assign(model, { createChannel: async () => relayChannel })
+    channel.publish = (
+        _exchange: string, routingKey: string, content: Buffer,
+        properties: MessageProperties, confirm: (err: null) => void,
+    ) => {
+        sent = { fields: { routingKey }, properties, content } as ConsumeMessage
+        confirm(null)
+        return true
+    }
+
+    try {
+        const setup = createSetup(startRelay)(model)
+        answer().resolve(channel)
+        await setup
+        expect(relayReady()).toBe(true)
+
+        publishEvent('friend.requested', { from: 'private-sender', to: 'private-recipient', created_at: 'now' })
+        deliver(sent)
+        const published = info.mock.calls.find(([, message]) => message === 'Published event')?.[0]
+        const relayed = info.mock.calls.find(([, message]) => message === 'Relayed event')?.[0]
+        expect(published).toEqual({ routingKey: 'friend.requested', messageId: sent.properties.messageId })
+        expect(relayed).toEqual({
+            routingKey: 'friend.requested', messageId: sent.properties.messageId, publisher: sent.properties.appId,
+        })
+        expect(JSON.stringify(info.mock.calls)).not.toContain('private-sender')
+
+        deliver(null)
+        expect(relayReady()).toBe(false)
+        expect(close).toHaveBeenCalledTimes(1)
+    } finally {
+        relayChannel.emit('close')
+        channel.emit('close')
+        close.mockRestore()
+        info.mockRestore()
+    }
 })

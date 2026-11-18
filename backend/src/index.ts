@@ -6,10 +6,13 @@ import fastifyMultipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import addGlobalErrorHandler from "./utils/errorHandler";
 import websocket from "./websocket";
+import healthRoutes from "./http/health";
+import { postgresReady } from "./repository/readiness";
+import { log } from "./utils/logger";
 import { config } from "./config";
 import { TooManyRequests } from "./errors";
-import { closeQueue, connectQueue } from "./queue/connection";
-import { reconnectPhones, startRelay } from "./websocket/relay";
+import { closeQueue, connectQueue, rabbitmqReady } from "./queue/connection";
+import { reconnectPhones, relayReady, startRelay } from "./websocket/relay";
 
 // request.ip is the client's real address only behind a proxy we trust
 // (config.ts); the rate limit counts by it. Fastify 5.12 ignores a plain hop
@@ -19,6 +22,8 @@ import { reconnectPhones, startRelay } from "./websocket/relay";
 // the compose stack the api has no published port, so its nearest hop is
 // always Traefik. Without TRUST_PROXY_HOPS (the laptop), nothing is trusted.
 const httpServer = fastify({
+    loggerInstance: log,
+    disableRequestLogging: true,
     trustProxy: config.trustProxyHops > 0
         ? (_address: string, hop: number) => hop < config.trustProxyHops
         : false,
@@ -50,6 +55,7 @@ await httpServer.register(fastifyMultipart, {
     },
 });
 
+await httpServer.register(healthRoutes, { postgres: postgresReady, rabbitmq: rabbitmqReady, relay: relayReady });
 await httpServer.register(auth);
 await httpServer.register(routes);
 await httpServer.register(websocket)
@@ -74,7 +80,6 @@ const host = process.env.HOST ?? "localhost";
 
 await httpServer.listen({ port, host });
 
-console.log(`Listening on http://${host}:${port}`);
 
 // Graceful shutdown. `docker stop` and every
 // deploy send SIGTERM, then kill the process 10 s later; Ctrl-C sends SIGINT.
@@ -88,18 +93,18 @@ const SHUTDOWN_LIMIT_MS = 8_000;
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
     process.once(signal, async () => {
-        console.log(`🛑 ${signal}: shutting down`);
+        log.info({ signal }, "🛑 Shutting down");
 
         // Something hanging must not turn this into Docker's kill at 10 s.
         setTimeout(() => {
-            console.error("❌ Shutdown took too long, exiting anyway");
+            log.error("❌ Shutdown took too long, exiting anyway");
             process.exit(1);
         }, SHUTDOWN_LIMIT_MS).unref();
 
         await httpServer.close();
         await sql.close();
 
-        console.log("✅ Shut down cleanly");
+        log.info("✅ Shut down cleanly");
         process.exit(0);
     });
 }

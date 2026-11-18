@@ -7,6 +7,8 @@ import { publishDelivered } from './queue/delivered'
 import type { EventPayload } from './queue/events'
 import { QUEUES } from './queue/topology'
 import * as services from './services'
+import { getOverdueSnapAgeSeconds } from './repository'
+import { log } from './utils/logger'
 
 // `bun run worker`: the background process. No HTTP, no sockets.
 //
@@ -55,7 +57,7 @@ async function startWorker(model: ChannelModel, publish: ConfirmChannel): Promis
         // deleted in the web UI. Close the connection, and recovery declares
         // the queue again and starts a new consumer.
         if (!msg) {
-            console.warn(`⚠️ Worker: ${QUEUES.expire} was cancelled, reconnecting`)
+            log.warn({ queue: QUEUES.expire }, '⚠️ Worker consumer cancelled, reconnecting')
             model.close().catch(() => {})
             return
         }
@@ -70,7 +72,7 @@ async function startWorker(model: ChannelModel, publish: ConfirmChannel): Promis
     checkChannel = channel
     void checkParkedQueues()
 
-    console.log(`✅ Worker reading ${QUEUES.expire}`)
+    log.info({ queue: QUEUES.expire }, '✅ Worker listening')
 }
 
 // One job: delete the snap the message names, then ack.
@@ -79,7 +81,7 @@ async function handle(channel: Channel, publish: ConfirmChannel, msg: ConsumeMes
     // (a poison message), so it skips the retries and is parked at once.
     const snapId = readSnapId(msg)
     if (!snapId) {
-        console.error(`❌ Worker: no snap_id in message ${msg.properties.messageId}, dead-lettered`)
+        log.error({ messageId: msg.properties.messageId }, '❌ Worker: no snap ID, dead-lettering job')
         settle(() => channel.nack(msg, false, false))
         return
     }
@@ -89,9 +91,9 @@ async function handle(channel: Channel, publish: ConfirmChannel, msg: ConsumeMes
     try {
         // Step 2: Delete it. Postgres decides whether it's really due.
         const deleted = await services.deleteExpiredSnap(snapId)
-        console.log(deleted
-            ? `🗑️ Snap ${snapId} expired: photo and row deleted (attempt ${attempt})`
-            : `Snap ${snapId}: already gone or not expired yet, nothing to do`)
+        log.info({ snapId, attempt, messageId: msg.properties.messageId }, deleted
+            ? '🗑️ Expired snap deleted'
+            : 'Snap already gone or not expired yet')
 
         // Step 3: Done, so RabbitMQ can forget the message — only now, after the work.
         settle(() => channel.ack(msg))
@@ -114,7 +116,7 @@ async function onFailure(
     // Step 1: Out of attempts → snap.dlx → snap.dead.queue. Nothing is lost:
     // the row is still there, so the sweep deletes the snap once the cause is gone.
     if (attempt >= config.snapMaxAttempts) {
-        console.error(`❌ DEAD-LETTERED snap_id=${snapId} after ${attempt} attempts: ${reason}`)
+        log.error({ snapId, attempt, reason, messageId: msg.properties.messageId }, '❌ DEAD-LETTERED')
         settle(() => channel.nack(msg, false, false))
         return
     }
@@ -125,15 +127,15 @@ async function onFailure(
     // routes by queue name — or acking could lose the job for good.
     try {
         await publishDelivered(publish, '', QUEUES.retryWait, msg.content, jobProperties(msg, attempt + 1))
-        console.warn(`⚠️ Snap ${snapId}: attempt ${attempt} of ${config.snapMaxAttempts} failed (${reason}), `
-            + `next try in ${config.snapRetryDelayMs / 1000} s`)
+        log.warn({ snapId, attempt, reason, messageId: msg.properties.messageId, retryDelayMs: config.snapRetryDelayMs },
+            '⚠️ Snap deletion failed, retry scheduled')
         settle(() => channel.ack(msg))
     } catch (publishErr) {
         // The copy didn't make it — refused, or no snap.retry.wait to take it —
         // so the original must stay. Park it rather than requeue it: a requeue
         // would come straight back and fail again.
         const why = publishErr instanceof Error ? publishErr.message : String(publishErr)
-        console.error(`❌ Snap ${snapId}: could not schedule a retry (${why}), dead-lettered`)
+        log.error({ snapId, reason: why, messageId: msg.properties.messageId }, '❌ Could not schedule retry, dead-lettering job')
         settle(() => channel.nack(msg, false, false))
     }
 }
@@ -153,8 +155,7 @@ async function checkParkedQueues(): Promise<void> {
             const before = lastCounts.get(queue) ?? 0
 
             if (messageCount > before) {
-                console.warn(`⚠️ ${queue} has ${messageCount} message(s) (+${messageCount - before}), `
-                    + 'look with `bun run dead-letters list`')
+                log.warn({ queue, messageCount, increase: messageCount - before }, '⚠️ Parking queue grew')
             }
             lastCounts.set(queue, messageCount)
         } catch {
@@ -164,7 +165,27 @@ async function checkParkedQueues(): Promise<void> {
     }
 }
 
-setInterval(() => void checkParkedQueues(), PARKED_CHECK_MS)
+let checkingExpiry = false
+
+async function checkExpiryLag(): Promise<void> {
+    if (checkingExpiry) return
+    checkingExpiry = true
+    try {
+        const ageSeconds = await getOverdueSnapAgeSeconds()
+        if (ageSeconds !== null) {
+            log.warn({ ageSeconds }, '⚠️ Oldest expired snap is over an hour overdue')
+        }
+    } catch (err) {
+        log.warn({ err }, '⚠️ Could not check expired snap age')
+    } finally {
+        checkingExpiry = false
+    }
+}
+
+setInterval(() => {
+    void checkParkedQueues()
+    void checkExpiryLag()
+}, PARKED_CHECK_MS)
 
 // The message is the snap.created event, unchanged by its trip through the timer.
 function readSnapId(msg: ConsumeMessage): string | null {
@@ -186,7 +207,7 @@ function settle(answer: () => void): void {
     try {
         answer()
     } catch {
-        console.warn('⚠️ Worker: channel closed before the answer, the job will come again')
+        log.warn('⚠️ Worker channel closed before settlement')
     }
 }
 
@@ -196,11 +217,11 @@ function settle(answer: () => void): void {
 const SHUTDOWN_LIMIT_MS = 8_000
 
 async function shutdown(signal: string): Promise<void> {
-    console.log(`🛑 ${signal}: taking no new jobs, finishing ${running.size} in progress`)
+    log.info({ signal, inFlight: running.size }, '🛑 Worker shutting down')
 
     // Something hanging must not turn this into Docker's kill at 10 s.
     setTimeout(() => {
-        console.error('❌ Shutdown took too long, exiting anyway')
+        log.error('❌ Shutdown took too long, exiting anyway')
         process.exit(1)
     }, SHUTDOWN_LIMIT_MS).unref()
 
@@ -214,7 +235,7 @@ async function shutdown(signal: string): Promise<void> {
     await closeQueue()
     await sql.close()
 
-    console.log('✅ Worker shut down cleanly')
+    log.info('✅ Worker shut down cleanly')
     process.exit(0)
 }
 

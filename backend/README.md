@@ -55,6 +55,19 @@ Traefik's three copies the real limit is three times as high.
 
 Snaps and messages can only be sent to mutual friends (`400 You are not friends with X`).
 
+## Health and logs
+
+Docker probes `GET /health` to check that the process can answer. Use
+`GET /health/ready` for deploy checks. It returns 200 when Postgres answers
+and this copy has a RabbitMQ connection and a running relay. Otherwise it
+returns 503 with the status of each check.
+
+The API, worker, and sweep write JSON logs with an `instance` field. Filter
+API logs by `messageId` to match a confirmed publish to the relay deliveries
+on other copies. These trace entries record event metadata and omit the event body.
+A broker outage logs a warning after two minutes. The worker checks once a
+minute for expired snaps more than an hour overdue.
+
 ## Realtime
 
 socket.io on the same port. Authenticate in the handshake with

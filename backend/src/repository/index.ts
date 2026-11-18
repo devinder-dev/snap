@@ -320,6 +320,18 @@ export async function getIncomingFriendRequests(username: string): Promise<Incom
     return rows as IncomingFriendRequest[]
 }
 
+// The expires_at index lets Postgres find the oldest row without a table scan.
+export async function getOverdueSnapAgeSeconds(): Promise<number | null> {
+    const [row] = await sql`
+        SELECT extract(epoch FROM now() - expires_at)::double precision AS age_seconds
+        FROM snaps
+        WHERE expires_at < now() - interval '1 hour'
+        ORDER BY expires_at
+        LIMIT 1
+    `
+    return row?.age_seconds ?? null
+}
+
 // The database's clock, once per sweep: one cutoff for the whole run. Read into
 // JavaScript it loses its microseconds, which only moves it slightly earlier —
 // a snap is never deleted before its time, at most a run later.

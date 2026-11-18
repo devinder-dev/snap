@@ -1,3 +1,4 @@
+import { log } from './utils/logger'
 import { config } from './config'
 import { AlreadyExists, BadRequest, NotFound, Unauthorized } from './errors'
 import type { AddFriendResponse, ApiConversation, ApiFriend, ApiFriendRequest, ApiMessage, ApiSnap, ApiSnapSummary, ApiUser, AuthRequest, SendSnapResponse } from './http/types'
@@ -169,7 +170,7 @@ export async function sendSnap(input: SendSnapInput): Promise<SendSnapResponse> 
         // been saved with only its answer lost — so the object stays, and the
         // bucket's 2-day lifecycle rule is the last resort if it wasn't.
         const attached = await repository.setSnapMedia(createdSnap.id, key, input.mimetype).catch((err) => {
-            console.error(`❌ Attaching photo ${key} to snap ${createdSnap.id} failed; the object is kept`, err)
+            log.error({ err, snapId: createdSnap.id }, '❌ Photo attach failed; object retained')
             throw err
         })
         if (!attached) {
@@ -324,7 +325,7 @@ export async function deleteExpiredSnaps(): Promise<SweepResult> {
         for (const result of results) {
             if (result.status === 'rejected') {
                 failed++
-                console.error('Could not delete expired snap media', result.reason)
+                log.error({ err: result.reason }, '❌ Could not delete expired snap media')
             }
         }
 
