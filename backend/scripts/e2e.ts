@@ -175,7 +175,24 @@ function nextEvent(
 const tokens: Record<string, { access: string; refresh: string }> = {}
 const sockets: Record<string, Socket> = {}
 const daveReceived: string[] = []
-let firstSnapUrl: string | undefined
+let firstSnapId: string | undefined
+
+const observedPhotos = new Set<string>()
+
+async function checkPhotoPresent(key: string | undefined, label: string): Promise<void> {
+    const status = key ? await s3.headFileStatus(key) : undefined
+    if (key && status === 200) observedPhotos.add(key)
+    check(`${label} (HEAD ${status ?? 'not sent'})`, status === 200)
+}
+
+async function checkPhotoGone(key: string | undefined, label: string): Promise<void> {
+    const status = key ? await s3.headFileStatus(key) : undefined
+    const seen = !!key && observedPhotos.has(key)
+    // AWS can hide absence as 403 without ListBucket. The stand-in must return 404.
+    const missing = status === 404 || (status === 403 && !process.env.S3_ENDPOINT)
+    check(`${label} (HEAD ${status ?? 'not sent'})`, seen && missing)
+}
+
 
 console.log(OTHER_URL === BASE_URL
     ? `e2e against ${BASE_URL} — run ${run}`
@@ -317,6 +334,7 @@ try {
         const received = nextEvent(sockets.ben!, 'snap_received', (p) => p.sender_username === users.anna)
         const sent = await api('POST', '/snaps', { token: tokens.anna!.access, form: snapForm([users.ben], { caption: 'hej ben' }) })
         const snapId: string | undefined = sent.body?.snap_id
+        firstSnapId = snapId
         const expiresIn = new Date(sent.body?.expires_at).getTime() - Date.now()
         check('anna sends ben a photo (201)', sent.status === 201 && typeof snapId === 'string', sent)
         check('it expires in 24 hours', Math.abs(expiresIn - DAY_MS) < 60_000, sent.body)
@@ -332,8 +350,11 @@ try {
         const notYours = await api('GET', `/snaps/${snapId}`, { token: tokens.cara!.access })
         check('cara cannot open a snap sent to ben (404)', notYours.status === 404, notYours)
 
+        const [firstMedia] = await sql`SELECT media_key FROM snaps WHERE id = ${snapId}`
+        await checkPhotoPresent(firstMedia?.media_key, "ben's photo exists before cleanup")
+
         const opened = await api('GET', `/snaps/${snapId}`, { token: tokens.ben!.access })
-        firstSnapUrl = opened.body?.media_url
+        const firstSnapUrl: string | undefined = opened.body?.media_url
         check('ben opens it: caption and a photo link', opened.status === 200 && opened.body?.body === 'hej ben' && typeof firstSnapUrl === 'string', opened)
 
         if (firstSnapUrl) {
@@ -370,7 +391,7 @@ try {
         const groupId: string = group.body?.snap_id
         const [media] = await sql`SELECT media_key FROM snaps WHERE id = ${groupId}`
         const key: string | undefined = media?.media_key
-        check('the group snap has a photo in S3', key !== undefined && (await fetch(s3.getPresignedUrl(key))).status === 200)
+        await checkPhotoPresent(key, 'the group snap has a photo in S3')
 
         await sql`UPDATE snaps SET expires_at = now() - interval '1 second' WHERE id = ${groupId}`
 
@@ -382,10 +403,7 @@ try {
         await services.deleteExpiredSnaps()
         const [stillThere] = await sql`SELECT id FROM snaps WHERE id = ${groupId}`
         check('the sweep deletes its row', stillThere === undefined)
-        if (key) {
-            const gone = await fetch(s3.getPresignedUrl(key))
-            check('and its photo in S3', gone.status !== 200, gone.status)
-        }
+        await checkPhotoGone(key, 'the swept photo is gone from S3')
     }
 
     section('Chat')
@@ -452,8 +470,8 @@ try {
     section('Cleanup')
     try {
         const usernames = Object.values(users)
-        const keys = await sql`
-            SELECT s.media_key
+        const keys = await sql<{ id: string; media_key: string }[]>`
+            SELECT s.id, s.media_key
             FROM snaps s
             JOIN users u ON u.id = s.sender_id
             WHERE u.username IN ${sql(usernames)} AND s.media_key IS NOT NULL
@@ -465,10 +483,8 @@ try {
         const deleted = await sql`DELETE FROM users WHERE username IN ${sql(usernames)} RETURNING id`
         console.log(`  removed ${keys.length} photo(s) from S3 and ${deleted.length} test user(s)`)
 
-        if (firstSnapUrl) {
-            const gone = await fetch(firstSnapUrl)
-            check("ben's photo is gone from S3", gone.status !== 200, gone.status)
-        }
+        const firstPhoto = keys.find(({ id }) => id === firstSnapId)
+        await checkPhotoGone(firstPhoto?.media_key, "ben's photo is gone from S3")
     } catch (error) {
         failures.push('cleanup')
         console.error(`  ✗ cleanup failed — remove users named zzt_${run}_* by hand`, error)

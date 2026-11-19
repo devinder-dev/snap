@@ -56,6 +56,14 @@ export function getPresignedUrl(
     return client.presign(key, { expiresIn, method: 'GET' })
 }
 
+// Use a signed HEAD so tests can distinguish a missing object (404) from
+// permission errors and outages. A failed GET also happens when a URL expires.
+export async function headFileStatus(key: string): Promise<number> {
+    const url = client.presign(key, { method: 'HEAD', expiresIn: 60 })
+    const response = await fetch(url, { method: 'HEAD', redirect: 'error' })
+    return response.status
+}
+
 // Delete an object. S3 answers a delete of a missing key with success, so this
 // is idempotent — two instances cleaning up the same snap is harmless.
 export async function deleteFile(key: string): Promise<void> {

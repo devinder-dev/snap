@@ -27,6 +27,9 @@ type AmqpError = Error & { code?: string | number }
 
 let connection: RecoveringChannelModel | null = null
 let publishChannel: ConfirmChannel | null = null
+let publishModel: ChannelModel | null = null
+const blockedModels = new WeakSet<ChannelModel>()
+let queueClosing: Promise<void> | undefined
 let stopping = false
 let connected = false
 const OUTAGE_WARNING_MS = 2 * 60_000
@@ -57,6 +60,14 @@ export function getPublishChannel(): ConfirmChannel | null {
     return publishChannel
 }
 
+export function publishBlocked(): boolean {
+    return publishModel !== null && blockedModels.has(publishModel)
+}
+
+export function queueStopping(): boolean {
+    return stopping
+}
+
 // `clientName` shows in the web UI's Connections tab, e.g. snap-api@<pod name>.
 // `onReady` runs after each connection amqplib has accepted — setup done, its
 // own watching in place — never for an attempt that failed half-way.
@@ -76,6 +87,11 @@ export async function connectQueue(clientName: string, onConnect?: OnConnect, on
         },
     })
 
+    if (stopping) {
+        await closeQueue()
+        return
+    }
+
     watchOutage()
     connection.on('connect', () => {
         if (stopping || !publishChannel) return
@@ -87,11 +103,15 @@ export async function connectQueue(clientName: string, onConnect?: OnConnect, on
 
     connection.on('disconnect', (err: AmqpError) => {
         connected = false
+        // amqplib emits disconnect before scheduling its next recovery attempt.
+        if (stopping) void closeQueue()
         watchOutage()
         log.warn({ reason: describe(err) }, '⚠️ RabbitMQ disconnected')
     })
 
-    connection.on('connect-failed', onConnectFailed)
+    connection.on('connect-failed', (err: AmqpError) => {
+        if (!stopping) onConnectFailed(err)
+    })
 
     connection.on('reconnect-scheduled', ({ attempt, delay }) => {
         log.info({ attempt, delayMs: delay }, 'RabbitMQ reconnect scheduled')
@@ -106,6 +126,18 @@ export async function connectQueue(clientName: string, onConnect?: OnConnect, on
 // function so a test can drive it with a fake connection (connection.test.ts).
 export function createSetup(onConnect?: OnConnect): (model: ChannelModel) => Promise<void> {
     return async (model: ChannelModel) => {
+        if (stopping) throw new Error('RabbitMQ setup stopped for shutdown')
+
+        // Listen during setup too: the recovery wrapper forwards these events
+        // only after setup resolves, but the broker can block earlier.
+        model.on('blocked', (reason: string) => {
+            blockedModels.add(model)
+            log.warn({ reason }, '⚠️ RabbitMQ blocked publishing')
+        })
+        model.on('unblocked', () => {
+            blockedModels.delete(model)
+            log.info('✅ RabbitMQ unblocked publishing')
+        })
         // amqplib only starts watching this connection after setup() has
         // returned, so watch it ourselves meanwhile:
         //   - 'error': the connection passes socket errors on as an 'error'
@@ -125,7 +157,10 @@ export function createSetup(onConnect?: OnConnect): (model: ChannelModel) => Pro
             const channel = await model.createConfirmChannel()
             watchChannel(model, channel, 'publish')
             channel.on('close', () => {
-                if (channel === publishChannel) publishChannel = null
+                if (channel === publishChannel) {
+                    publishChannel = null
+                    publishModel = null
+                }
             })
 
             // Step 2: Every exchange, queue and binding (queue/topology.ts).
@@ -135,11 +170,14 @@ export function createSetup(onConnect?: OnConnect): (model: ChannelModel) => Pro
             // event published before this copy's realtime queue is bound
             // could match no binding at all and land in snap.unrouted,
             // which is there to catch typos, not real events.
+            if (stopping) throw new Error('RabbitMQ setup stopped for shutdown')
             if (onConnect) await onConnect(model, channel)
 
             // Step 4: Open for publishing — unless the connection closed
             // meanwhile: then this attempt failed, and amqplib tries again.
             if (closedDuringSetup) throw new Error('RabbitMQ connection closed during setup')
+            if (stopping) throw new Error('RabbitMQ setup stopped for shutdown')
+            publishModel = model
             publishChannel = channel
         } finally {
             // Safe to stop here: between setup() returning and amqplib adding
@@ -188,13 +226,27 @@ export function watchChannel(model: ChannelModel, channel: Channel, name: string
     })
 }
 
-// Stops recovery and closes the connection; its channels go with it.
-export async function closeQueue(): Promise<void> {
+// Disable publishing and consumer setup before shutdown starts draining.
+// amqplib has no pause method: keep a live model for acknowledgements, but
+// close recovery immediately if the model is already gone or disconnects.
+export function stopQueueRecovery(): void {
+    stopping = true
+    clearOutage()
+    publishChannel = null
+    publishModel = null
+    if (!connected) void closeQueue()
+}
+
+export function closeQueue(): Promise<void> {
     stopping = true
     connected = false
     clearOutage()
     publishChannel = null
-    await connection?.close()
+    publishModel = null
+    if (!connection) return Promise.resolve()
+    return queueClosing ??= connection.close().catch((err) => {
+        log.error({ err }, '❌ RabbitMQ close failed')
+    })
 }
 
 // Network errors come with an empty message and only a code.

@@ -125,3 +125,54 @@ test('publisher and relay log the same event ID and cancellation clears relay re
         info.mockRestore()
     }
 })
+
+test('pending live publishes stay bounded and resume after a confirm', async () => {
+    const { publishEvent } = await import('./publish')
+    const { model, answer } = fakeConnection()
+    const channel = fakeChannel()
+    const confirms: ((error: null) => void)[] = []
+    let writable = true
+    channel.publish = (...args: unknown[]) => {
+        confirms.push(args[4] as (error: null) => void)
+        return writable
+    }
+
+    const info = spyOn(log, 'info').mockImplementation(() => {})
+    const warn = spyOn(log, 'warn').mockImplementation(() => {})
+    const payload = { from: 'anna', to: 'ben', created_at: 'now' }
+    try {
+        const setup = createSetup()(model)
+        answer().resolve(channel)
+        await setup
+        for (let i = 0; i < 300; i++) publishEvent('friend.requested', payload)
+        expect(confirms).toHaveLength(256)
+        expect(warn.mock.calls.some(([fields]) =>
+            (fields as { reason?: string }).reason === 'confirm limit')).toBe(true)
+        confirms[0]!(null)
+        publishEvent('friend.requested', payload)
+        expect(confirms).toHaveLength(257)
+
+        confirms[1]!(null)
+        model.emit('blocked', 'memory alarm')
+        publishEvent('friend.requested', payload)
+        expect(confirms).toHaveLength(257)
+        expect(warn.mock.calls.some(([fields]) =>
+            (fields as { reason?: string }).reason === 'broker blocked')).toBe(true)
+        model.emit('unblocked')
+        writable = false
+        publishEvent('friend.requested', payload)
+        expect(confirms).toHaveLength(258)
+
+        confirms[2]!(null)
+        publishEvent('friend.requested', payload)
+        expect(confirms).toHaveLength(258)
+        writable = true
+        channel.emit('drain')
+        publishEvent('friend.requested', payload)
+        expect(confirms).toHaveLength(259)
+    } finally {
+        channel.emit('close')
+        info.mockRestore()
+        warn.mockRestore()
+    }
+})

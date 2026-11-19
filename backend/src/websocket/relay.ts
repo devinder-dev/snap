@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Channel, ChannelModel, ConsumeMessage } from 'amqplib'
 import { config } from '../config'
-import { watchChannel } from '../queue/connection'
+import { queueStopping, watchChannel } from '../queue/connection'
 import { EXCHANGES } from '../queue/topology'
 import { emitEvent } from './controllers'
 import { getWebsocketServer } from './server'
@@ -69,6 +69,7 @@ export async function startRelay(model: ChannelModel): Promise<void> {
 
     // Step 3: Read it.
     await channel.prefetch(PREFETCH)
+    if (queueStopping()) throw new Error('Relay is shutting down')
     await channel.consume(queue, (msg) => {
         // null: RabbitMQ cancelled this consumer. Rare, since nobody else can
         // even delete an exclusive queue (the web UI gets a 400), but a relay
@@ -87,7 +88,7 @@ export async function startRelay(model: ChannelModel): Promise<void> {
         channel.ack(msg)
     })
 
-    if (inactive) throw new Error('Relay closed during setup')
+    if (queueStopping() || inactive) throw new Error('Relay closed during setup')
     relayChannel = channel
     log.info({ queue }, '✅ Relay listening')
 }

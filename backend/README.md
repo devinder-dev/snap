@@ -68,6 +68,18 @@ on other copies. These trace entries record event metadata and omit the event bo
 A broker outage logs a warning after two minutes. The worker checks once a
 minute for expired snaps more than an hour overdue.
 
+During a broker alarm or a full publisher buffer, the API continues to serve
+HTTP and logs dropped live events. Each publish channel holds at most 256
+outstanding confirms. A worker job gets 30 seconds, including its retry
+publish. If it times out, the worker closes RabbitMQ without settling that
+delivery and exits so its process supervisor can restart it.
+
+The e2e checks a fresh signed HEAD before and after photo deletion. It expects
+200 before deletion and 404 after it. With the default AWS endpoint, it also
+accepts 403 after a successful HEAD for that same key. AWS can hide a missing
+object as 403 when the app has no `s3:ListBucket` permission. S3Mock must return
+404 after deletion.
+
 ## Realtime
 
 socket.io on the same port. Authenticate in the handshake with

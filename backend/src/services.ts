@@ -271,11 +271,13 @@ export async function reportScreenshot(username: string, snapId: string): Promis
 // Returns false when there was nothing to do: the snap is already gone (the
 // sweep got there first, or this message is a redelivery) or, re-checked in
 // Postgres, not expired yet. Both are fine, so running this twice is safe.
-export async function deleteExpiredSnap(snapId: string): Promise<boolean> {
+export async function deleteExpiredSnap(snapId: string, signal?: AbortSignal): Promise<boolean> {
     const snap = await repository.getExpiredSnapById(snapId)
     if (!snap) return false
 
+    signal?.throwIfAborted()
     if (snap.media_key) await s3.deleteFile(snap.media_key)
+    signal?.throwIfAborted()
     await repository.deleteSnaps([snap.id])
     return true
 }

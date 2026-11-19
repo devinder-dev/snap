@@ -9,9 +9,10 @@ import websocket from "./websocket";
 import healthRoutes from "./http/health";
 import { postgresReady } from "./repository/readiness";
 import { log } from "./utils/logger";
+import { createShutdown } from "./utils/shutdown";
 import { config } from "./config";
 import { TooManyRequests } from "./errors";
-import { closeQueue, connectQueue, rabbitmqReady } from "./queue/connection";
+import { closeQueue, connectQueue, queueStopping, rabbitmqReady, stopQueueRecovery } from "./queue/connection";
 import { reconnectPhones, relayReady, startRelay } from "./websocket/relay";
 
 // request.ip is the client's real address only behind a proxy we trust
@@ -63,13 +64,25 @@ await httpServer.register(websocket)
 // No expiry job in here any more: the worker deletes each snap when its timer
 // runs out (`bun run worker`), and `bun run sweep` is the safety net.
 
+// Stop broker recovery before Fastify drains requests. The onClose hook
+// then closes the live broker connection after those requests finish.
+const shutdown = createShutdown(async () => {
+    stopQueueRecovery();
+    await httpServer.close();
+    await sql.close();
+});
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.on(signal, () => void shutdown(signal));
+}
+
 // RabbitMQ. This returns at once, even while RabbitMQ is down: amqplib keeps
 // connecting in the background, and the HTTP API works without it. On every
 // (re)connect the relay starts again: this copy's queue for live pushes. Once
 // RabbitMQ has accepted that connection, the phones connected here are made to
 // reconnect and refetch what they missed (relay.ts).
-await connectQueue('snap-api', startRelay, reconnectPhones)
 httpServer.addHook('onClose', closeQueue)
+await connectQueue('snap-api', startRelay, reconnectPhones)
 
 const port = Number(process.env.PORT ?? 3000);
 
@@ -78,33 +91,4 @@ const port = Number(process.env.PORT ?? 3000);
 // Docker's port mapping, Traefik — could reach the API.
 const host = process.env.HOST ?? "localhost";
 
-await httpServer.listen({ port, host });
-
-
-// Graceful shutdown. `docker stop` and every
-// deploy send SIGTERM, then kill the process 10 s later; Ctrl-C sends SIGINT.
-// Bun ignores SIGTERM unless something listens for it, so without this every
-// stop would end in that kill.
-//
-// close() stops taking new connections, runs preClose (disconnects the sockets,
-// so the phones reconnect to another copy), waits for open requests to finish,
-// then runs onClose (closes RabbitMQ, and this copy's realtime queue with it).
-const SHUTDOWN_LIMIT_MS = 8_000;
-
-for (const signal of ["SIGTERM", "SIGINT"] as const) {
-    process.once(signal, async () => {
-        log.info({ signal }, "🛑 Shutting down");
-
-        // Something hanging must not turn this into Docker's kill at 10 s.
-        setTimeout(() => {
-            log.error("❌ Shutdown took too long, exiting anyway");
-            process.exit(1);
-        }, SHUTDOWN_LIMIT_MS).unref();
-
-        await httpServer.close();
-        await sql.close();
-
-        log.info("✅ Shut down cleanly");
-        process.exit(0);
-    });
-}
+if (!queueStopping()) await httpServer.listen({ port, host });

@@ -2,13 +2,15 @@ import { sql } from 'bun'
 import type { Channel, ChannelModel, ConfirmChannel, ConsumeMessage } from 'amqplib'
 import { config } from './config'
 import { jobProperties, readAttempt } from './queue/attempts'
-import { closeQueue, connectQueue, watchChannel } from './queue/connection'
+import { closeQueue, connectQueue, queueStopping, stopQueueRecovery, watchChannel } from './queue/connection'
 import { publishDelivered } from './queue/delivered'
+import { runJobWithDeadline } from './queue/job-deadline'
 import type { EventPayload } from './queue/events'
 import { QUEUES } from './queue/topology'
 import * as services from './services'
 import { getOverdueSnapAgeSeconds } from './repository'
 import { log } from './utils/logger'
+import { createShutdown } from './utils/shutdown'
 
 // `bun run worker`: the background process. No HTTP, no sockets.
 //
@@ -29,6 +31,8 @@ import { log } from './utils/logger'
 // How many jobs one worker holds at once: RabbitMQ never sends it more
 // unacked messages than this.
 const PREFETCH = 10
+const JOB_DEADLINE_MS = 30_000
+let deadlineHit = false
 
 // The parking lots: nothing reads them, so nobody notices them filling up
 // unless something counts.
@@ -52,20 +56,43 @@ async function startWorker(model: ChannelModel, publish: ConfirmChannel): Promis
     await channel.prefetch(PREFETCH)
 
     // Step 2: Read the queue. Each job runs on its own; up to PREFETCH at once.
+    if (queueStopping()) throw new Error('Worker is shutting down')
     const { consumerTag } = await channel.consume(QUEUES.expire, (msg) => {
         // null: RabbitMQ cancelled this consumer, e.g. snap.expire.queue was
         // deleted in the web UI. Close the connection, and recovery declares
         // the queue again and starts a new consumer.
+        if (queueStopping()) return
         if (!msg) {
             log.warn({ queue: QUEUES.expire }, '⚠️ Worker consumer cancelled, reconnecting')
             model.close().catch(() => {})
             return
         }
 
-        const job = handle(channel, publish, msg)
+        const job = runJobWithDeadline(
+            (signal) => handle(channel, publish, msg, signal),
+            () => {
+                if (deadlineHit) return
+                deadlineHit = true
+                stopQueueRecovery()
+                log.error({ messageId: msg.properties.messageId, deadlineMs: JOB_DEADLINE_MS },
+                    '❌ Worker deadline exceeded; recycling with delivery unacknowledged')
+                process.exitCode = 1
+                void closeQueue()
+                void shutdown('job deadline', true)
+            },
+            JOB_DEADLINE_MS,
+        )
         running.add(job)
-        void job.finally(() => running.delete(job))
+        void job.then(
+            () => running.delete(job),
+            (err) => {
+                running.delete(job)
+                log.error({ err, messageId: msg.properties.messageId }, '❌ Unexpected worker job failure')
+                void shutdown('job failure', true)
+            },
+        )
     })
+    if (queueStopping()) throw new Error('Worker is shutting down')
     consumer = { channel, tag: consumerTag }
 
     // Step 3: Count the parking lots now, and every PARKED_CHECK_MS from here.
@@ -76,7 +103,9 @@ async function startWorker(model: ChannelModel, publish: ConfirmChannel): Promis
 }
 
 // One job: delete the snap the message names, then ack.
-async function handle(channel: Channel, publish: ConfirmChannel, msg: ConsumeMessage): Promise<void> {
+async function handle(
+    channel: Channel, publish: ConfirmChannel, msg: ConsumeMessage, signal: AbortSignal,
+): Promise<void> {
     // Step 1: Which snap? Without a usable snap_id the job can never succeed
     // (a poison message), so it skips the retries and is parked at once.
     const snapId = readSnapId(msg)
@@ -90,7 +119,8 @@ async function handle(channel: Channel, publish: ConfirmChannel, msg: ConsumeMes
 
     try {
         // Step 2: Delete it. Postgres decides whether it's really due.
-        const deleted = await services.deleteExpiredSnap(snapId)
+        const deleted = await services.deleteExpiredSnap(snapId, signal)
+        if (signal.aborted || deadlineHit) return
         log.info({ snapId, attempt, messageId: msg.properties.messageId }, deleted
             ? '🗑️ Expired snap deleted'
             : 'Snap already gone or not expired yet')
@@ -98,7 +128,7 @@ async function handle(channel: Channel, publish: ConfirmChannel, msg: ConsumeMes
         // Step 3: Done, so RabbitMQ can forget the message — only now, after the work.
         settle(() => channel.ack(msg))
     } catch (err) {
-        await onFailure(channel, publish, msg, snapId, attempt, err)
+        if (!signal.aborted && !deadlineHit) await onFailure(channel, publish, msg, snapId, attempt, err, signal)
     }
 }
 
@@ -109,7 +139,8 @@ async function onFailure(
     msg: ConsumeMessage,
     snapId: string,
     attempt: number,
-    err: unknown
+    err: unknown,
+    signal: AbortSignal,
 ): Promise<void> {
     const reason = err instanceof Error ? err.message : String(err)
 
@@ -127,10 +158,12 @@ async function onFailure(
     // routes by queue name — or acking could lose the job for good.
     try {
         await publishDelivered(publish, '', QUEUES.retryWait, msg.content, jobProperties(msg, attempt + 1))
+        if (signal.aborted || deadlineHit) return
         log.warn({ snapId, attempt, reason, messageId: msg.properties.messageId, retryDelayMs: config.snapRetryDelayMs },
             '⚠️ Snap deletion failed, retry scheduled')
         settle(() => channel.ack(msg))
     } catch (publishErr) {
+        if (signal.aborted || deadlineHit) return
         // The copy didn't make it — refused, or no snap.retry.wait to take it —
         // so the original must stay. Park it rather than requeue it: a requeue
         // would come straight back and fail again.
@@ -182,7 +215,7 @@ async function checkExpiryLag(): Promise<void> {
     }
 }
 
-setInterval(() => {
+const monitor = setInterval(() => {
     void checkParkedQueues()
     void checkExpiryLag()
 }, PARKED_CHECK_MS)
@@ -211,36 +244,22 @@ function settle(answer: () => void): void {
     }
 }
 
-// Graceful shutdown: `docker stop` sends SIGTERM and kills
-// the process 10 s later; Ctrl-C sends SIGINT. A job cut off halfway isn't
-// lost — unacked, it comes back after a restart — but finishing it is cleaner.
-const SHUTDOWN_LIMIT_MS = 8_000
-
-async function shutdown(signal: string): Promise<void> {
-    log.info({ signal, inFlight: running.size }, '🛑 Worker shutting down')
-
-    // Something hanging must not turn this into Docker's kill at 10 s.
-    setTimeout(() => {
-        log.error('❌ Shutdown took too long, exiting anyway')
-        process.exit(1)
-    }, SHUTDOWN_LIMIT_MS).unref()
-
-    // Step 1: Stop taking jobs. Fails harmlessly if the channel is already gone.
-    await consumer?.channel.cancel(consumer.tag).catch(() => {})
-
-    // Step 2: Let the running jobs finish and ack.
-    await Promise.allSettled(running)
-
-    // Step 3: Close RabbitMQ, then the database pool.
+// Stop recovery before cancelling the consumer. A deadline closes the broker
+// connection immediately so unacked deliveries can be redelivered.
+const shutdown = createShutdown(async (_reason, forced) => {
+    stopQueueRecovery()
+    clearInterval(monitor)
+    if (!forced) {
+        await consumer?.channel.cancel(consumer.tag).catch(() => {})
+        await Promise.allSettled(running)
+    }
     await closeQueue()
-    await sql.close()
+    if (!forced && !deadlineHit) await sql.close()
+})
 
-    log.info('✅ Worker shut down cleanly')
-    process.exit(0)
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.on(signal, () => void shutdown(signal))
 }
-
-process.once('SIGTERM', () => void shutdown('SIGTERM'))
-process.once('SIGINT', () => void shutdown('SIGINT'))
 
 // Like the API, this returns at once: amqplib connects in the background and
 // runs startWorker on every (re)connect.
