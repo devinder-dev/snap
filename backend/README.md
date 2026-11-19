@@ -25,6 +25,34 @@ Ben and Dave use the second server, Anna and Cara the first.
 `bun run migrate status` / `bun run migrate rollback` pass straight through to dbmate.
 The script adds `sslmode=disable` for dbmate only; the app's `DATABASE_URL` stays as is.
 
+## Demo accounts
+
+After running migrations against a demo database, set `SNAP_DEMO_PASSWORD` in
+your environment or local `.env` and run this from `backend/`:
+
+```bash
+bun run seed:demo
+```
+
+Use a fresh password with at least 12 characters and at most 72 bytes. The command
+creates `demo_anna` and `demo_ben` as mutual friends. Both use the supplied demo
+password. Running the command again with the same password keeps the existing
+accounts and friendships. If an existing account has another password, the
+transaction rolls back without changing either account. The command prints only
+the usernames.
+
+In the Compose stack, export `SNAP_DEMO_PASSWORD` in your shell and run from
+the repo root after migrations:
+
+```bash
+docker compose -f docker-compose.yml -f compose.stack.yml run --rm --no-deps \
+  -e SNAP_DEMO_PASSWORD --entrypoint bun migrate run seed:demo
+```
+
+## Image scan
+
+CI scans the Linux amd64 `app` image after e2e. Fixable HIGH or CRITICAL findings fail CI, and unfixed findings are listed in the report.
+
 ## HTTP API
 
 Protected routes need `Authorization: Bearer <access_token>`. Every error has the

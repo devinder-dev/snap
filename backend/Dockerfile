@@ -14,6 +14,7 @@
 
 # Step 1: The base. Pinned to the Bun the code is developed and tested with.
 FROM oven/bun:1.4.4-slim AS base
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 # The package files on their own, before any code: as long as they don't

@@ -1,7 +1,7 @@
 # CI/CD for Snap. On every push, to any branch:
 #
 #   checks   no secrets committed; the backend and the app typecheck; unit tests
-#   stack    both images built; the whole stack started in compose (3 api copies,
+#   stack    both images built; runtime image scanned; stack started in compose (3 api copies,
 #            the worker, Traefik, S3Mock); the e2e run twice — across two named
 #            copies, and through Traefik
 #   publish  main only, after both passed: the images pushed to ghcr.io, tagged
@@ -137,6 +137,35 @@ jobs:
 
       - name: e2e through Traefik
         run: docker compose run --rm -e E2E_BASE_URL=http://traefik -e E2E_OTHER_URL=http://traefik e2e
+
+      - name: Log out of Docker Hub
+        run: docker logout
+
+      - name: Scan runtime image
+        id: runtime-scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: snap-app:local
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          format: table
+          ignore-unfixed: 'true'
+          exit-code: '1'
+
+      # Include unfixed findings even when the gate already failed.
+      - name: List runtime image findings including unfixed
+        if: ${{ !cancelled() && (steps.runtime-scan.outcome == 'success' || steps.runtime-scan.outcome == 'failure') }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: snap-app:local
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          format: table
+          ignore-unfixed: 'false'
+          exit-code: '0'
+          skip-setup-trivy: 'true'
 
       - name: Logs of the stack
         if: failure()

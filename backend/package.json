@@ -9,6 +9,7 @@
     "sweep": "bun scripts/sweep.ts",
     "dead-letters": "bun scripts/dead-letters.ts",
     "migrate": "bun scripts/migrate.ts",
+    "seed:demo": "bun scripts/seed-demo.ts",
     "e2e": "bun scripts/e2e.ts"
   },
   "devDependencies": {
