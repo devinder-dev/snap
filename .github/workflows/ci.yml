@@ -41,7 +41,7 @@ jobs:
       # key formats on push; this also catches a committed .env file.
       - name: No secrets committed
         run: |
-          if git ls-files | grep -E '(^|/)\.env' | grep -vE '(^|/)\.env\.example$'; then
+          if git ls-files | grep -E '(^|/)\.env' | grep -vE '(^|/)\.env\.example$|^\.env\.prod\.example$'; then
             echo "::error::An .env file is committed. Remove it from git and replace every key it held."
             exit 1
           fi

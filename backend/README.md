@@ -35,10 +35,10 @@ bun run seed:demo
 ```
 
 Use a fresh password with at least 12 characters and at most 72 bytes. The command
-creates `demo_anna` and `demo_ben` as mutual friends. Both use the supplied demo
-password. Running the command again with the same password keeps the existing
+creates `demo_anna` and `demo_ben` as mutual friends and `demo_cara` without
+friends. All three use the supplied demo password. Running the command again with the same password keeps the existing
 accounts and friendships. If an existing account has another password, the
-transaction rolls back without changing either account. The command prints only
+transaction rolls back without changing any account. The command prints only
 the usernames.
 
 In the Compose stack, export `SNAP_DEMO_PASSWORD` in your shell and run from
@@ -161,9 +161,9 @@ bun run dead-letters purge  # delete them for good
 
 ## Docker
 
-One `Dockerfile`, two targets. `app` runs the api by default, and the worker and the
-sweep with a different command; `tools` adds the dev packages and runs the migrations
-(and the e2e). Only what `.dockerignore` lets in reaches the image — never `.env`.
+One `Dockerfile`, two targets. The distroless `app` runs the API, worker, and sweep
+by invoking Bun directly. The Debian `tools` image runs migrations and e2e and
+includes development dependencies. Only what `.dockerignore` lets in reaches the image — never `.env`.
 
 ```bash
 docker build --target app   -t snap-app   .
@@ -172,7 +172,7 @@ docker build --target tools -t snap-tools .
 # On the compose network, where the database and RabbitMQ are called postgres
 # and rabbitmq (DATABASE_URL and RABBITMQ_URL must use those names):
 docker run --rm --network snap_default --env-file .env -p 127.0.0.1:3001:3000 snap-app
-docker run --rm --network snap_default --env-file .env snap-app bun --sql-preconnect src/worker.ts
+docker run --rm --network snap_default --env-file .env snap-app /usr/local/bin/bun --sql-preconnect src/worker.ts
 docker run --rm --network snap_default --env-file .env snap-tools          # migrations
 ```
 
