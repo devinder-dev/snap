@@ -48,6 +48,7 @@ export const S = {
     submit: 'Skapa konto',
     hasAccount: 'Har du redan ett konto?',
     goToLogin: 'Logga in',
+    demoClosed: 'Registreringen är stängd på demoservern',
     /** lead-in above a verbatim 409 */
     failed: 'Kunde inte skapa kontot',
     /** lead-in above a verbatim 500 */
@@ -55,6 +56,7 @@ export const S = {
   },
 
   validation: {
+    registrationUsername: 'Använd 1–32 tecken: A–Z, siffror, understreck, punkt eller bindestreck. Välj ett annat namn än . eller ..',
     bothFields: 'Fyll i båda fälten',
     usernameRequired: 'Fyll i ett användarnamn',
   },

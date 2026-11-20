@@ -6,14 +6,18 @@
 A Snapchat-style app: send photo and text snaps that can be viewed once and disappear after
 24 hours, chat with friends, and get every update live.
 
-**Expo (React Native) · Bun · Fastify · PostgreSQL · AWS S3 · socket.io · RabbitMQ · Docker ·
+**Expo (React Native) · Bun · Fastify · PostgreSQL · S3-compatible storage · socket.io · RabbitMQ · Docker ·
 Traefik** — the backend runs as three copies behind one address.
 
 > **Status:** the backend runs as three copies behind Traefik. Live pushes cross between them
 > through RabbitMQ, and a worker deletes each snap when its 24-hour timer runs out, with retries,
 > a dead-letter queue and an hourly safety-net sweep. GitHub Actions starts that whole stack and
-> runs the end-to-end test on every push, then publishes the images to ghcr.io. Next: hardening
-> for the public internet, then a deploy to one server.
+> runs the end-to-end test on every push, then publishes the images to ghcr.io. Public-internet
+> hardening is done. The production deployment to a shared server is in progress.
+
+## How it works
+
+- [Production stack and the shared edge](docs/how-it-works/production-stack.md)
 
 ## What it does
 

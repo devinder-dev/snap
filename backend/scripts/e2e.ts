@@ -22,6 +22,7 @@
 //   E2E_OTHER_URL=http://localhost:3001 bun run e2e
 
 import { sql } from 'bun'
+import { REGISTRATION_CODE_HEADER } from '../src/http/registration-guard'
 import { io, type Socket } from 'socket.io-client'
 import * as services from '../src/services'
 import * as s3 from '../src/utils/s3'
@@ -90,6 +91,10 @@ async function api(
 ): Promise<ApiResponse> {
     const headers: Record<string, string> = {}
     if (options.token) headers.authorization = `Bearer ${options.token}`
+    const registrationCode = process.env.SNAP_REGISTRATION_CODE
+    if (method === 'POST' && path === '/register' && registrationCode) {
+        headers[REGISTRATION_CODE_HEADER] = registrationCode
+    }
 
     let body: string | FormData | undefined
     if (options.json !== undefined) {
@@ -102,7 +107,7 @@ async function api(
     }
 
     const server = serverByToken.get(options.token ?? '') ?? BASE_URL
-    const response = await fetch(`${server}${path}`, { method, headers, body })
+    const response = await fetch(`${server}${path}`, { method, headers, body, redirect: 'error' })
     const text = await response.text()
 
     let parsed: unknown = undefined
@@ -135,7 +140,14 @@ function connect(token: string): Promise<Socket> {
         // WebSocket only, like the app — and no automatic reconnect, so a refused
         // handshake fails here instead of retrying forever.
         const server = serverByToken.get(token) ?? BASE_URL
-        const socket = io(server, { transports: ['websocket'], auth: { token }, reconnection: false })
+        const socket = io(server, {
+            transports: ['websocket'],
+            auth: { token },
+            reconnection: false,
+            // Bun's Socket.IO transport needs this explicitly for the local self-signed edge.
+            // The public certificate works with verification on.
+            rejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0',
+        })
         socket.once('connect', () => resolve(socket))
         socket.once('connect_error', (error) => {
             socket.close()

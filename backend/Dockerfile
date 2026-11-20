@@ -27,25 +27,19 @@ COPY package.json bun.lock ./
 FROM base AS prod-deps
 RUN bun install --frozen-lockfile --production
 
-# Step 3: app — what runs in production.
-FROM base AS app
+# Runtime has no shell. Compose invokes Bun directly for jobs and health checks.
+FROM oven/bun:1.4.4-distroless AS app
+WORKDIR /app
+COPY --from=prod-deps /app/package.json /app/bun.lock ./
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY tsconfig.json ./
 COPY src ./src
 COPY scripts/sweep.ts ./scripts/sweep.ts
-
-# Listen on every network interface: inside a container, "localhost" would
-# mean the container itself, unreachable from outside it.
 ENV HOST=0.0.0.0
-
-# The image's own unprivileged user: a bug in the app can't change the system.
-USER bun
+USER 65532:65532
 EXPOSE 3000
-
-# Exec form (a JSON list): Bun itself is the container's first process, so
-# it receives docker stop's SIGTERM. `bun run dev` would start a shell, and
-# the shell wouldn't pass the signal on.
-CMD ["bun", "--sql-preconnect", "src/index.ts"]
+ENTRYPOINT []
+CMD ["/usr/local/bin/bun", "--sql-preconnect", "src/index.ts"]
 
 # Step 4: tools — every package, dev ones included: dbmate for the
 # migrations, socket.io-client for the e2e. Runs the migrations by default.

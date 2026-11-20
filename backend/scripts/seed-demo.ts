@@ -1,7 +1,7 @@
 import { sql } from 'bun'
 import { hashPassword, verifyPassword } from '../src/utils/password'
 
-const usernames = ['demo_anna', 'demo_ben'] as const
+const usernames = ['demo_anna', 'demo_ben', 'demo_cara'] as const
 const conflictMessage = 'A demo username already has a different password. No changes saved.'
 
 async function main(): Promise<void> {
@@ -13,27 +13,28 @@ async function main(): Promise<void> {
     }
 
     try {
-        const [annaHash, benHash] = await Promise.all([hashPassword(password), hashPassword(password)])
+        const [annaHash, benHash, caraHash] = await Promise.all(usernames.map(() => hashPassword(password)))
 
         await sql.begin(async (tx) => {
             // An existing account can only be reused if the supplied password
             // already works. Never reset an account to claim a demo username.
             await tx`
                 INSERT INTO users (username, password_hash)
-                VALUES (${usernames[0]}, ${annaHash}), (${usernames[1]}, ${benHash})
+                VALUES (${usernames[0]}, ${annaHash}), (${usernames[1]}, ${benHash}), (${usernames[2]}, ${caraHash})
                 ON CONFLICT (username) DO NOTHING
             `
-            const [anna, ben] = await tx<{ id: string; username: string; password_hash: string }[]>`
+            const [anna, ben, cara] = await tx<{ id: string; username: string; password_hash: string }[]>`
                 SELECT id, username, password_hash
                 FROM users
-                WHERE username IN (${usernames[0]}, ${usernames[1]})
+                WHERE username IN (${usernames[0]}, ${usernames[1]}, ${usernames[2]})
                 ORDER BY username
                 FOR UPDATE
             `
-            if (!anna || !ben) throw new Error('Demo accounts disappeared during setup.')
+            if (!anna || !ben || !cara) throw new Error('Demo accounts disappeared during setup.')
             const matches = await Promise.all([
                 verifyPassword(password, anna.password_hash),
                 verifyPassword(password, ben.password_hash),
+                verifyPassword(password, cara.password_hash),
             ])
             if (matches.includes(false)) {
                 throw new Error(conflictMessage)
@@ -47,7 +48,7 @@ async function main(): Promise<void> {
             `
         })
 
-        console.log(`✅ Demo users ready: ${usernames.join(', ')} (mutual friends)`)
+        console.log('✅ Demo users ready: demo_anna and demo_ben are mutual friends; demo_cara starts without friends')
     } catch (err) {
         // SQL errors can include query details. Keep credentials out of output.
         const message = err instanceof Error && err.message === conflictMessage

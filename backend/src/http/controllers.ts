@@ -1,3 +1,4 @@
+import { assertRegistrationUsername } from './registration-username'
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { AddFriendRequest, AuthRequest, FriendParams, MessageParams, MessagesQuery, RefreshRequest, SendMessageRequest, SendSnapBody, SnapParams, Tokens } from './types'
 import * as services from '../services'
@@ -58,7 +59,9 @@ function parseCredentials(body: Partial<AuthRequest> | undefined): AuthRequest {
 }
 
 export async function register(req: FastifyRequest<{ Body: AuthRequest }>, res: FastifyReply) {
-    const createdUser = await services.register(parseCredentials(req.body))
+    const credentials = parseCredentials(req.body)
+    assertRegistrationUsername(credentials.username)
+    const createdUser = await services.register(credentials)
 
     const tokens = await generateFreshTokens(createdUser.username, res)
 

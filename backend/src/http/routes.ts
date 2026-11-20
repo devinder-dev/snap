@@ -1,16 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import * as controllers from './controllers'
+import { registerRegistrationRoute } from './registration-guard'
 
 async function routes(httpServer: FastifyInstance) {
 
-    // At most 20 new accounts per client IP a minute: room for a few typos and
-    // the e2e's seven, not for a script creating thousands.
-    httpServer.route({
-        method: 'POST',
-        url: '/register',
-        config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
-        handler: controllers.register
-    })
+    registerRegistrationRoute(httpServer, process.env.SNAP_REGISTRATION_CODE, controllers.register)
 
     // At most 5 tries a minute for one account from one IP — counted per
     // account, so a typo on yours doesn't block someone else on the same

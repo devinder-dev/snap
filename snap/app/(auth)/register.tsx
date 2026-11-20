@@ -13,7 +13,7 @@ import { Colors, Spacing } from '@/constants/design';
 import { S } from '@/constants/strings';
 import { useAuth } from '@/contexts/auth-context';
 import { ApiError } from '@/lib/api';
-import { validateCredentials } from '@/lib/validation';
+import { validateRegistration } from '@/lib/validation';
 
 export default function RegisterScreen() {
   const { signUp } = useAuth();
@@ -26,7 +26,7 @@ export default function RegisterScreen() {
   const [submitting, setSubmitting] = useState(false);
 
   async function handleSubmit() {
-    const invalid = validateCredentials(username, password);
+    const invalid = validateRegistration(username, password);
     if (invalid) {
       // Our own validation never goes through the banner — that slot is the server's.
       setFieldError(invalid);
@@ -43,9 +43,11 @@ export default function RegisterScreen() {
       // No navigation — setting the user flips the guard in app/_layout.tsx.
     } catch (e) {
       if (e instanceof ApiError) {
-        // 409 is "pick another name"; 500 is "not your fault" — different lead-ins.
+        let lead: string = S.register.serverFailed;
+        if (e.code === 403) lead = S.register.demoClosed;
+        if (e.code === 400 || e.code === 409) lead = S.register.failed;
         setServerError({
-          lead: e.code === 409 ? S.register.failed : S.register.serverFailed,
+          lead,
           detail: e.message,
         });
       } else {
