@@ -13,7 +13,7 @@
 # What goes into the image at all is decided by .dockerignore (an allowlist).
 
 # Step 1: The base. Pinned to the Bun the code is developed and tested with.
-FROM oven/bun:1.4.4-slim AS base
+FROM oven/bun:1.4.5-slim AS base
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
@@ -28,7 +28,7 @@ FROM base AS prod-deps
 RUN bun install --frozen-lockfile --production
 
 # Runtime has no shell. Compose invokes Bun directly for jobs and health checks.
-FROM oven/bun:1.4.4-distroless AS app
+FROM oven/bun:1.4.5-distroless AS app
 WORKDIR /app
 COPY --from=prod-deps /app/package.json /app/bun.lock ./
 COPY --from=prod-deps /app/node_modules ./node_modules
