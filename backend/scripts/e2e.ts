@@ -137,8 +137,7 @@ function snapForm(recipients: string[], options: { caption?: string; type?: stri
 
 function connect(token: string): Promise<Socket> {
     return new Promise((resolve, reject) => {
-        // WebSocket only, like the app — and no automatic reconnect, so a refused
-        // handshake fails here instead of retrying forever.
+        // Fail the initial handshake immediately, including the bad-token test.
         const server = serverByToken.get(token) ?? BASE_URL
         const socket = io(server, {
             transports: ['websocket'],
@@ -148,10 +147,16 @@ function connect(token: string): Promise<Socket> {
             // The public certificate works with verification on.
             rejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0',
         })
-        socket.once('connect', () => resolve(socket))
-        socket.once('connect_error', (error) => {
+        const initialError = (error: Error) => {
             socket.close()
             reject(error)
+        }
+        socket.once('connect_error', initialError)
+        socket.once('connect', () => {
+            socket.off('connect_error', initialError)
+            // After a successful handshake, reconnect on transport loss like the app.
+            socket.io.reconnection(true)
+            resolve(socket)
         })
     })
 }

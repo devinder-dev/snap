@@ -2,7 +2,10 @@ import { log } from './logger'
 
 const SHUTDOWN_LIMIT_MS = 8_000
 
-export function createShutdown(cleanup: (reason: string, forced: boolean) => Promise<void>) {
+export function createShutdown(
+    cleanup: (reason: string, forced: boolean) => Promise<void>,
+    limitMs = SHUTDOWN_LIMIT_MS,
+) {
     let pending: Promise<void> | undefined
 
     return (reason: string, forced = false): Promise<void> => {
@@ -11,7 +14,7 @@ export function createShutdown(cleanup: (reason: string, forced: boolean) => Pro
             const guard = setTimeout(() => {
                 log.error('❌ Shutdown took too long, exiting anyway')
                 process.exit(1)
-            }, SHUTDOWN_LIMIT_MS)
+            }, limitMs)
 
             try {
                 await cleanup(reason, forced)

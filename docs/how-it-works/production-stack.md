@@ -21,7 +21,9 @@ Internet -> shared Traefik :443 -> edge -> API x3 -> private -> Postgres
 
 ## Try it yourself
 
-Start the shared edge first and use the standalone production file. The laptop and CI files carry development services and ports, so leave them out of the production invocation. Keep the server's `.env` private.
+Use the [rolling deploy](deploy.md) to install and update the server. For a
+standalone rehearsal, start the shared edge first and use the production file.
+Keep the server's `.env` private.
 
 ```sh
 cp -n .env.prod.example .env
@@ -36,7 +38,7 @@ docker compose --env-file .env -f compose.prod.yml run --rm seed-demo
 
 Generate the database and broker passwords with separate `openssl rand -hex 32` calls. Hex characters work both as passwords and inside the connection URLs. Use a separate random registration code and JWT secret. Set `SNAP_DEMO_PASSWORD` to seed the three demo accounts. Anna and Ben start as mutual friends. Cara starts with nobody. Rerunning seeds the Anna–Ben friendship without removing relationships made during a demo.
 
-On the public host, `curl -fsS https://<host>/health` checks liveness, and `/health/ready` checks Postgres, RabbitMQ, and the relay on the responding copy. Compose and Traefik use liveness to keep a shared dependency outage from removing all copies. Migrations run as a one-shot service. The Postgres and RabbitMQ named volumes survive a normal Compose stop or down. Reuse the same project name and the same volume credentials when starting again.
+On the public host, `curl -fsS https://<host>/health` checks liveness, and `/health/ready` checks Postgres, RabbitMQ, and the relay on the responding copy. Docker probes `/health/traffic` and Traefik uses the resulting container health. The traffic probe only reads local drain state. Migrations run as a one-shot service. The Postgres and RabbitMQ named volumes survive a normal Compose stop or down. Reuse the same project name and the same volume credentials when starting again.
 
 ### Rehearsal measurements
 
