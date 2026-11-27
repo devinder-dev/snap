@@ -4,11 +4,16 @@ type ReadinessChecks = {
     postgres: () => Promise<boolean>
     rabbitmq: () => boolean
     relay: () => boolean
+    draining: () => boolean
 }
 
 export default async function healthRoutes(server: FastifyInstance, checks: ReadinessChecks) {
-    // Docker's liveness probe must stay independent of shared services.
+    // Both process and traffic probes work without Postgres or RabbitMQ.
     server.get('/health', async () => ({ status: 'ok' }))
+    server.get('/health/traffic', async (_request, reply) => {
+        const draining = checks.draining()
+        return reply.code(draining ? 503 : 200).send({ status: draining ? 'draining' : 'ok' })
+    })
 
     server.get('/health/ready', async (_request, reply) => {
         const postgres = await checks.postgres()

@@ -56,7 +56,14 @@ await httpServer.register(fastifyMultipart, {
     },
 });
 
-await httpServer.register(healthRoutes, { postgres: postgresReady, rabbitmq: rabbitmqReady, relay: relayReady });
+let draining = false;
+const productionDrain = process.env.SNAP_TRAFFIC_DRAIN === "1";
+await httpServer.register(healthRoutes, {
+    postgres: postgresReady,
+    rabbitmq: rabbitmqReady,
+    relay: relayReady,
+    draining: () => draining,
+});
 await httpServer.register(auth);
 await httpServer.register(routes);
 await httpServer.register(websocket)
@@ -64,13 +71,16 @@ await httpServer.register(websocket)
 // No expiry job in here any more: the worker deletes each snap when its timer
 // runs out (`bun run worker`), and `bun run sweep` is the safety net.
 
-// Stop broker recovery before Fastify drains requests. The onClose hook
-// then closes the live broker connection after those requests finish.
 const shutdown = createShutdown(async () => {
+    // Step 1: Let Docker report unhealthy and Traefik refresh its routes while HTTP still serves.
+    draining = true;
+    if (productionDrain) await Bun.sleep(12_000);
+
+    // Step 2: Finish HTTP requests and let phones reconnect, then close shared clients.
     stopQueueRecovery();
     await httpServer.close();
     await sql.close();
-});
+}, productionDrain ? 322_000 : undefined);
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
     process.on(signal, () => void shutdown(signal));
@@ -91,4 +101,4 @@ const port = Number(process.env.PORT ?? 3000);
 // Docker's port mapping, Traefik — could reach the API.
 const host = process.env.HOST ?? "localhost";
 
-if (!queueStopping()) await httpServer.listen({ port, host });
+if (!draining && !queueStopping()) await httpServer.listen({ port, host });

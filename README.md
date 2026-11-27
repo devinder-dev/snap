@@ -18,6 +18,7 @@ Traefik** — the backend runs as three copies behind one address.
 ## How it works
 
 - [Production stack and the shared edge](docs/how-it-works/production-stack.md)
+- [Deploy and roll back while Snap is serving](docs/how-it-works/deploy.md)
 
 ## What it does
 
