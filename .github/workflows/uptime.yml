@@ -1,0 +1,23 @@
+name: Snap uptime
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    if: vars.SNAP_UPTIME_URL != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    env:
+      UPTIME_URL: ${{ vars.SNAP_UPTIME_URL }}
+    steps:
+      - name: Require HTTP 200 from readiness
+        run: |
+          [[ "$UPTIME_URL" == https://* ]] || { echo 'Set an HTTPS readiness URL'; exit 1; }
+          status=$(curl --disable --silent --show-error --max-time 15 --output /dev/null \
+            --write-out '%{http_code}' --proto '=https' -- "$UPTIME_URL")
+          [[ "$status" == 200 ]] || { echo "Readiness returned HTTP $status"; exit 1; }

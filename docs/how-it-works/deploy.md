@@ -70,7 +70,8 @@ would also support overlap, but would need shared networks and a separate
 traffic switch. Keep overlapping versions' router and service labels compatible.
 The script scales by three with `--no-recreate`, identifies the three new
 containers by ID, and removes the old IDs after the cutover. On an empty or
-parked stack it starts three copies. At the measured 32–37 MiB per idle copy,
+parked stack it starts three copies. After parking, allow Traefik 1–2 seconds
+to add the route. An immediate request can return 404. At the measured 32–37 MiB per idle copy,
 six should use 192–222 MiB combined, about 96–111 MiB above steady state.
 Their combined ceiling is 1,536 MiB. On the 1-CPU, 4-GB VM, measure memory
 and request latency during the overlap. The rehearsal peaked at 1,429 of
@@ -149,7 +150,7 @@ ssh -T -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile
 ```
 
 Once the server has the lock, the deploy ignores SSH hangups and writes
-progress to `~/snap-deploy/deploy.log`. SSH returns the exit status when
+progress to `~/snap-deploy/deploy.log`. SSH returns the final result line and exit status when
 the connection stays open. Migration failures are logged as fixed diagnostic
 categories so tool output cannot expose connection details. After a failed
 CI deploy, use the operator key to check the log and `deployed` before

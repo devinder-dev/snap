@@ -3,7 +3,8 @@ set -euo pipefail
 umask 077
 
 fail() {
-    printf 'Snap deploy: %s\n' "$*" >&2
+    result="Snap deploy: $*"
+    if [[ ${logging:-} != yes ]]; then printf '%s\n' "$result" >&2; fi
     exit 1
 }
 
@@ -21,7 +22,25 @@ flock -n 9 || fail 'deploy lock is held'
 
 # A rollout owns the lock until it finishes, even if the SSH client leaves.
 trap '' HUP
+exec 8>&1
 exec </dev/null >>"$root/deploy.log" 2>&1
+logging=yes
+result='Snap deploy: failed; see deploy.log'
+staging=
+next_state=
+cleanup_needed=
+finish() {
+    local status=$?
+    trap - EXIT
+    if [[ -n $cleanup_needed ]]; then cleanup_candidates || true; fi
+    if [[ -n $staging ]]; then rm -rf -- "$staging" || true; fi
+    if [[ -n $next_state ]]; then rm -f -- "$next_state" || true; fi
+    printf '%s\n' "$result"
+    # A broken SSH pipe can only terminate this subshell, after the rollout.
+    (printf '%s\n' "$result" >&8) 2>/dev/null || true
+    exit "$status"
+}
+trap finish EXIT
 printf '\n%s Snap deploy: requested %s\n' "$(date -u +%FT%TZ)" "$1"
 
 current=
@@ -47,10 +66,9 @@ if [[ ! -d $release ]]; then
             fail 'SHA is outside the deployment source main branch'
     fi
     staging=$(mktemp -d "$releases/.release.XXXXXXXX")
-    trap 'rm -rf -- "$staging"' EXIT
     git -C "$source_repo" archive "$sha" compose.prod.yml infra/rabbitmq | tar -xf - -C "$staging"
     mv -- "$staging" "$release"
-    trap - EXIT
+    staging=
 fi
 
 # Docker bind-mounts these versioned files into containers running as other users.
@@ -148,17 +166,15 @@ if (( ${#old_ids[@]} == 3 )) &&
     printf 'Snap deploy: three target API copies already healthy\n'
 else
     cleanup_candidates() {
-        local status=$? candidates
-        trap - EXIT
-        candidates=$(new_api_ids) || exit "$status"
+        local candidates
+        candidates=$(new_api_ids) || return
         if [[ -n $candidates ]]; then
             mapfile -t candidate_ids <<< "$candidates"
             stop_and_remove "${candidate_ids[@]}" ||
                 printf 'Snap deploy: candidate cleanup needs attention\n' >&2
         fi
-        exit "$status"
     }
-    trap cleanup_candidates EXIT
+    cleanup_needed=yes
     trap 'exit 130' INT
     trap 'exit 143' TERM
     "${compose[@]}" up -d --no-deps --no-recreate --pull never --scale "api=$((${#old_ids[@]} + 3))" api >/dev/null 2>&1 ||
@@ -178,7 +194,8 @@ else
 
     # Step 5: Old APIs withdraw from Traefik on SIGTERM before closing their listeners.
     # Keep the new copies even if stopping an old copy fails after cutover starts.
-    trap - EXIT INT TERM
+    cleanup_needed=
+    trap - INT TERM
     if (( ${#old_ids[@]} )); then
         stop_and_remove "${old_ids[@]}"
     fi
@@ -191,7 +208,7 @@ if [[ $sha != "$current" ]]; then
     previous="${current:--}"
 fi
 next_state=$(mktemp "$root/.deployed.XXXXXXXX")
-trap 'rm -f -- "$next_state"' EXIT
 printf '%s %s\n' "$sha" "${previous:--}" > "$next_state"
 mv -f -- "$next_state" "$state"
-printf 'Snap deploy: deployed %s (previous %s)\n' "$sha" "${previous:--}"
+next_state=
+printf -v result 'Snap deploy: deployed %s (previous %s)' "$sha" "${previous:--}"
