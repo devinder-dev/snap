@@ -17,6 +17,8 @@ name: CI
 on:
   push:
   workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
 
 # Read-only unless a job asks for more (only publish does).
 permissions:

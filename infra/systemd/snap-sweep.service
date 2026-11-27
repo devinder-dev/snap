@@ -1,0 +1,10 @@
+[Unit]
+Description=Snap sweep
+After=docker.service
+
+[Service]
+Type=oneshot
+User=deploy
+UMask=0077
+ExecStart=/home/deploy/snap-deploy/bin/sweep.sh
+TimeoutStartSec=15min
